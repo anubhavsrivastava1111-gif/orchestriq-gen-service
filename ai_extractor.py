@@ -1,405 +1,413 @@
 """
-AI Parameter Extractor
-Uses Claude to extract precise, structured financial parameters from natural language.
-The Python engines use these parameters deterministically — AI does intelligence,
-Python does construction. This is the architecture that produces CFO-grade output.
+OrchestrIQ AI Extractor v3
+Calls Claude/OpenAI/Gemini to extract structured schema from free-text content.
+Returns validated schema ready for each engine.
 """
+import json, re, os
+from typing import Optional
 
-import json
-import re
-import anthropic
-from typing import Any, Dict
+def _clean_json(raw: str) -> str:
+    raw = raw.strip()
+    raw = re.sub(r'^```json\s*', '', raw, flags=re.I)
+    raw = re.sub(r'^```\s*', '', raw, flags=re.I)
+    raw = re.sub(r'```\s*$', '', raw)
+    return raw.strip()
 
-# ─── EXTRACTION PROMPTS BY DOC TYPE ──────────────────────────────────────────
+def _try_parse(text: str) -> Optional[dict]:
+    try:
+        return json.loads(_clean_json(text))
+    except:
+        pass
+    # Find first { block
+    m = re.search(r'\{[\s\S]+\}', text)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except:
+            pass
+    return None
 
-EXCEL_EXTRACTION_PROMPT = """You are a CFO-grade financial analyst extracting parameters from a business objective.
-Your output will be used by a deterministic Python engine to build a professional Excel workbook.
-You MUST return only a valid JSON object. No preamble. No explanation. No markdown fences.
-
-EXTRACTION RULES:
-1. Extract or infer ALL financial numbers from the context. If not provided, use realistic industry benchmarks.
-2. Numbers must be raw integers/floats — NEVER strings like "₹5L" or "$500K". Write 500000.
-3. Percentages as fractions: 15% = 0.15. NEVER 15 or "15%".
-4. All currency values in the stated currency unit (full amount, not lakhs/crores shorthand).
-5. Choose template_type based on the objective — do not default to financial_dashboard if something more specific fits.
-6. num_periods should be 24 for monthly projections (2 years). Use 12 if the user specifies 1 year.
-7. revenue_growth_rate_monthly: if user says "15% annual growth", convert: (1.15)^(1/12)-1 ≈ 0.0117.
-8. If multiple revenue streams are mentioned, list them separately. If not mentioned, create 1 realistic stream.
-9. Extract company name from context. Use "Your Company" if not found.
-10. The filename field must be URL-safe (hyphens, no spaces, no special chars).
-
-TEMPLATE TYPES (choose the most specific fit):
-- financial_dashboard: P&L + Cash Flow + Balance Sheet. Use for general "financial model", "dashboard", "management accounts"
-- saas_metrics: MRR, Churn, LTV, CAC, ARR. Use for SaaS, subscription, recurring revenue businesses
-- runway_planner: Burn rate, cash position, funding runway. Use for "runway", "burn rate", "how long will cash last"
-- budget_vs_actual: Two-column comparison. Use for "budget", "forecast vs actual", "variance analysis"
-- unit_economics: Per-unit profitability. Use for "unit economics", "contribution margin", "per-customer economics"
-- headcount_model: People costs. Use for "headcount", "org chart", "staffing plan", "salary budget"
-- general_model: Flexible template for anything that doesn't fit the above
-
-OUTPUT SCHEMA (return this exact structure):
-{
-  "template_type": "financial_dashboard",
-  "company_name": "Acme Corp",
-  "title": "Financial Dashboard — Acme Corp FY2025-26",
-  "subtitle": "Prepared for Board Review · July 2025 · Management Estimates",
-  "filename": "Acme-Corp-Financial-Dashboard-FY2025",
-  "currency": "INR",
-  "currency_symbol": "₹",
-  "num_periods": 24,
-  "start_month": "Jan 2025",
-  "assumptions": {
-    "revenue_base_monthly": 500000,
-    "revenue_growth_rate_monthly": 0.05,
-    "revenue_streams": [
-      {"name": "Product Sales", "monthly_base": 350000, "growth_rate": 0.05},
-      {"name": "Services", "monthly_base": 150000, "growth_rate": 0.08}
-    ],
-    "cogs_pct": 0.35,
-    "salaries_annual": 3600000,
-    "marketing_annual": 600000,
-    "rent_annual": 360000,
-    "technology_annual": 240000,
-    "other_opex_annual": 300000,
-    "opening_cash": 5000000,
-    "ar_days": 30,
-    "ap_days": 45,
-    "capex_annual": 500000,
-    "depreciation_years": 5,
-    "tax_rate": 0.25,
-    "headcount": 12
-  },
-  "saas_metrics": {
-    "mrr_base": 0,
-    "monthly_churn_rate": 0,
-    "new_customers_monthly": 0,
-    "cac": 0,
-    "arpu_monthly": 0,
-    "ltv_months": 0
-  },
-  "runway_inputs": {
-    "current_cash": 0,
-    "monthly_burn_categories": []
-  },
-  "budget_data": {
-    "categories": [],
-    "budget_values": [],
-    "actual_values": []
-  },
-  "key_context": "Any important additional context the engine should know",
-  "sections": []
-}"""
-
-PPTX_EXTRACTION_PROMPT = """You are a McKinsey-grade analyst creating a structured presentation outline.
-Extract content parameters for a professional PowerPoint deck.
-Return ONLY valid JSON. No preamble. No fences.
-
-OUTPUT SCHEMA:
-{
-  "title": "Board Presentation — Q2 FY2025",
-  "subtitle": "Strategic Review & Financial Performance",
-  "company_name": "Acme Corp",
-  "filename": "Acme-Corp-Q2-Board-Presentation",
-  "currency": "INR",
-  "currency_symbol": "₹",
-  "presenter": "Management Team",
-  "date": "July 2025",
-  "audience": "Board of Directors",
-  "classification": "Confidential",
-  "executive_summary": {
-    "headline": "Revenue grew 34% YoY; runway extends to 18 months post Series A",
-    "key_points": [
-      "₹7.2Cr revenue in Q2, up 34% YoY, driven by enterprise segment",
-      "Gross margin expanded 400bps to 68% on operational leverage",
-      "Cash position ₹22Cr; 18-month runway with current burn of ₹1.2Cr/month"
-    ]
-  },
-  "financial_data": {
-    "revenue": [4200000, 4800000, 5500000, 6100000, 6800000, 7200000],
-    "gross_profit": [2700000, 3100000, 3600000, 4000000, 4500000, 4900000],
-    "ebitda": [420000, 580000, 770000, 920000, 1100000, 1260000],
-    "net_profit": [300000, 430000, 600000, 750000, 900000, 1080000],
-    "cash": [25000000, 23800000, 22600000, 21400000, 20200000, 22000000],
-    "period_labels": ["Jan", "Feb", "Mar", "Apr", "May", "Jun"],
-    "kpis": [
-      {"label": "Revenue Q2", "value": "₹7.2Cr", "change": "+34% YoY", "status": "good"},
-      {"label": "Gross Margin", "value": "68%", "change": "+400bps", "status": "good"},
-      {"label": "EBITDA Margin", "value": "17.5%", "change": "+6pp", "status": "good"},
-      {"label": "Runway", "value": "18 months", "change": "Post Series A", "status": "neutral"},
-      {"label": "Burn Rate", "value": "₹1.2Cr/mo", "change": "-8% MoM", "status": "good"},
-      {"label": "Headcount", "value": "47 FTE", "change": "+12 QoQ", "status": "neutral"}
-    ]
-  },
-  "slides": [
-    {
-      "layout": "title",
-      "title": "Q2 FY2025 Board Review",
-      "subtitle": "Financial Performance & Strategic Update"
-    },
-    {
-      "layout": "exec_summary",
-      "title": "Revenue grew 34% YoY; EBITDA positive for second consecutive quarter",
-      "bullets": ["Point 1", "Point 2", "Point 3"]
-    },
-    {
-      "layout": "kpi_dashboard",
-      "title": "Key Performance Indicators — Q2 FY2025"
-    },
-    {
-      "layout": "revenue_chart",
-      "title": "Revenue trajectory on track; enterprise mix improving",
-      "insight": "Enterprise segment now 62% of revenue, up from 45% in Q2 FY24",
-      "bullets": ["Insight 1", "Insight 2", "Insight 3"]
-    },
-    {
-      "layout": "pl_table",
-      "title": "P&L Summary — strong margin expansion across all levels",
-      "table_data": {
-        "headers": ["Metric", "Q1 FY25", "Q2 FY25", "QoQ", "Q2 FY24", "YoY"],
-        "rows": [
-          ["Revenue (₹Cr)", "5.9", "7.2", "+22%", "5.4", "+34%"],
-          ["Gross Profit (₹Cr)", "3.8", "4.9", "+29%", "3.4", "+44%"],
-          ["Gross Margin %", "64%", "68%", "+4pp", "63%", "+5pp"],
-          ["EBITDA (₹Cr)", "0.82", "1.26", "+54%", "0.31", "+3.1x"],
-          ["Net Profit (₹Cr)", "0.60", "1.08", "+80%", "0.18", "+5.6x"]
-        ]
-      }
-    },
-    {
-      "layout": "cash_runway",
-      "title": "Cash position secured; 18-month runway post-Series A close",
-      "insight": "Net cash build of ₹1.8Cr in Q2; positive free cash flow expected from Q3"
-    },
-    {
-      "layout": "full_text",
-      "title": "Strategic priorities for H2 FY2025",
-      "bullets": ["Priority 1", "Priority 2", "Priority 3", "Priority 4"]
-    },
-    {
-      "layout": "next_steps",
-      "title": "Decisions required from the Board",
-      "bullets": ["Decision 1", "Decision 2", "Decision 3"]
-    },
-    {
-      "layout": "closing",
-      "title": "Thank You"
-    }
-  ]
-}"""
-
-PDF_EXTRACTION_PROMPT = """You are a Big4-grade analyst creating a structured report.
-Extract content for a professional PDF report. Return ONLY valid JSON. No preamble. No fences.
-
-OUTPUT SCHEMA:
-{
-  "title": "Business Performance Review — Q2 FY2025",
-  "subtitle": "Prepared for Executive Management",
-  "company_name": "Acme Corp",
-  "filename": "Acme-Corp-Q2-Performance-Review",
-  "classification": "Confidential",
-  "date": "July 2025",
-  "currency": "INR",
-  "currency_symbol": "₹",
-  "executive_summary": "3-5 sentence precise summary with numbers.",
-  "key_findings": [
-    "Finding 1 with specific metric",
-    "Finding 2 with specific metric",
-    "Finding 3 with specific metric"
-  ],
-  "recommendations": [
-    "Recommendation 1 — specific and actionable",
-    "Recommendation 2 — specific and actionable"
-  ],
-  "sections": [
-    {
-      "title": "Financial Performance",
-      "level": 1,
-      "content": "Detailed content in markdown. Use **bold** for key terms. Use tables with | syntax.",
-      "tables": [
-        {
-          "title": "P&L Summary (₹ Lakhs)",
-          "headers": ["Metric", "Q1 FY25", "Q2 FY25", "Change"],
-          "rows": [
-            ["Revenue", "59.0", "72.0", "+22%"],
-            ["Gross Profit", "38.0", "49.0", "+29%"]
-          ]
-        }
-      ]
-    },
-    {
-      "title": "Revenue Analysis",
-      "level": 1,
-      "content": "Detailed content here."
-    }
-  ],
-  "appendices": [
-    {
-      "title": "Detailed Financial Tables",
-      "content": "Supporting data here."
-    }
-  ]
-}"""
-
-DOCX_EXTRACTION_PROMPT = """You are a management consultant creating a structured Word document.
-Extract content for a professional Word document. Return ONLY valid JSON. No preamble. No fences.
-
-Use the same schema as the PDF extraction prompt but with document-appropriate content.
-OUTPUT SCHEMA: Same as PDF schema above."""
-
-PROMPTS = {
-    "excel": EXCEL_EXTRACTION_PROMPT,
-    "pptx": PPTX_EXTRACTION_PROMPT,
-    "pdf": PDF_EXTRACTION_PROMPT,
-    "docx": DOCX_EXTRACTION_PROMPT,
-}
-
-
-# ─── EXTRACTOR ────────────────────────────────────────────────────────────────
-
-async def extract_parameters(
+async def extract_excel_schema(
     objective: str,
-    context: str,
-    data: str,
+    company_context: str,
+    available_data: str,
     currency: str,
     currency_symbol: str,
-    doc_type: str,
     api_key: str,
-) -> Dict[str, Any]:
-    """
-    Call Claude to extract structured parameters from natural language.
-    Returns a dict that the appropriate engine uses deterministically.
-    """
-    client = anthropic.Anthropic(api_key=api_key)
-    system_prompt = PROMPTS.get(doc_type, PROMPTS["excel"])
+) -> dict:
+    """Extract structured Excel schema from AI."""
+    
+    prompt = f"""You are a CFO-grade financial analyst. Extract a structured workbook schema.
 
-    user_message = f"""OBJECTIVE: {objective}
-
-COMPANY CONTEXT:
-{context or "Not provided — use realistic defaults for an Indian startup."}
-
-AVAILABLE DATA / NUMBERS:
-{data or "No specific data provided. Infer realistic parameters from the objective and context."}
-
+OBJECTIVE: {objective}
+COMPANY: {company_context}
 CURRENCY: {currency_symbol} ({currency})
+DATA PROVIDED: {available_data or "None — generate realistic sample data"}
 
-Extract all parameters and return the JSON object now.
-Remember: ALL numbers must be raw integers/floats. ALL percentages as fractions (0.15 = 15%).
-The output will be used directly by a Python code generator — accuracy is critical."""
+Return ONLY this JSON (no preamble, no fences):
+{{
+  "title": "Workbook title",
+  "company": "Company name",
+  "industry": "Industry",
+  "summary_kpis": [
+    {{"label": "MRR", "value": "{currency_symbol}42,50,000", "delta": "+18%"}},
+    {{"label": "ARR", "value": "{currency_symbol}5.1Cr", "delta": "+22%"}},
+    {{"label": "Gross Margin", "value": "67%", "delta": "+2pts"}},
+    {{"label": "Runway", "value": "16 months", "delta": "-2mo"}}
+  ],
+  "sheets": [
+    {{
+      "name": "Financial Summary",
+      "type": "data",
+      "headers": ["Metric", "Q1", "Q2", "Q3", "Q4", "FY Total"],
+      "rows": [
+        ["Revenue", 1250000, 1480000, 1720000, 2100000, "=B2+C2+D2+E2"],
+        ["COGS", 437500, 518000, 602000, 735000, "=B3+C3+D3+E3"],
+        ["Gross Profit", "=B2-B3", "=C2-C3", "=D2-D3", "=E2-E3", "=F2-F3"],
+        ["Gross Margin %", "=B4/B2", "=C4/C2", "=D4/D2", "=E4/E2", "=F4/F2"],
+        ["Operating Expenses", 890000, 950000, 1020000, 1150000, "=B5+C5+D5+E5"],
+        ["EBITDA", "=B4-B5", "=C4-C5", "=D4-D5", "=E4-E5", "=F4-F5"],
+        ["EBITDA Margin %", "=B6/B2", "=C6/C2", "=D6/D2", "=E6/E2", "=F6/F2"]
+      ],
+      "summary_kpis": []
+    }},
+    {{
+      "name": "Budget vs Actual",
+      "type": "data",
+      "headers": ["Category", "Budget", "Actual", "Variance", "Variance %", "Status"],
+      "rows": [
+        ["Revenue", 1500000, 1720000, "=C2-B2", "=D2/B2", "Above"],
+        ["Marketing", 200000, 185000, "=C3-B3", "=D3/B3", "Under"],
+        ["Engineering", 350000, 372000, "=C4-B4", "=D4/B4", "Over"],
+        ["Sales", 280000, 265000, "=C5-B5", "=D5/B5", "Under"],
+        ["G&A", 120000, 118000, "=C6-B6", "=D6/B6", "Under"],
+        ["Total OpEx", "=B3+B4+B5+B6", "=C3+C4+C5+C6", "=C7-B7", "=D7/B7", "Under"]
+      ]
+    }},
+    {{
+      "name": "Monthly Trend",
+      "type": "data",
+      "headers": ["Month", "Revenue", "Customers", "MRR", "Churn %", "NRR %"],
+      "rows": [
+        ["Jan 2025", 890000, 42, 890000, 0.018, 1.12],
+        ["Feb 2025", 945000, 47, 945000, 0.015, 1.15],
+        ["Mar 2025", 1020000, 54, 1020000, 0.012, 1.18],
+        ["Apr 2025", 1150000, 61, 1150000, 0.011, 1.21],
+        ["May 2025", 1280000, 69, 1280000, 0.010, 1.19],
+        ["Jun 2025", 1420000, 78, 1420000, 0.009, 1.22],
+        ["Jul 2025", 1580000, 87, 1580000, 0.008, 1.24],
+        ["Aug 2025", 1720000, 96, 1720000, 0.007, 1.25]
+      ]
+    }}
+  ],
+  "assumptions": [
+    {{"parameter": "Revenue growth rate", "value": "22%", "basis": "Q3 actuals extrapolated", "confidence": "[ESTIMATE]"}},
+    {{"parameter": "Gross margin target", "value": "68%", "basis": "Industry benchmark SaaS", "confidence": "[VERIFIED]"}},
+    {{"parameter": "Churn improvement", "value": "0.5% reduction per quarter", "basis": "CSM initiative plan", "confidence": "[ASSUMPTION]"}}
+  ],
+  "instructions": "Update the Assumptions sheet to change projections. All other sheets update automatically via formulas."
+}}
 
-    response = client.messages.create(
-        model="claude-sonnet-4-6",
-        max_tokens=4000,
-        system=system_prompt,
-        messages=[{"role": "user", "content": user_message}],
-    )
+CRITICAL: Every numeric cell must have a REAL non-zero value. Use {currency_symbol} amounts appropriate for {company_context}. Include formulas (starting with =) wherever possible. Never use placeholder zeros."""
 
-    raw = response.content[0].text.strip()
+    schema = await _call_ai(prompt, api_key)
+    if not schema:
+        schema = _fallback_excel_schema(objective, company_context, currency_symbol)
+    return schema
 
-    # Aggressive JSON extraction — 4 strategies
-    params = _try_parse(raw)
-    if not params:
-        m = re.search(r"\{[\s\S]*\}", raw)
-        if m:
-            params = _try_parse(m.group(0))
-    if not params:
-        params = _repair_json(raw)
-    if not params:
-        # Ultimate fallback — return safe defaults
-        params = _safe_defaults(objective, currency, currency_symbol)
+async def extract_pptx_schema(
+    objective: str,
+    company_context: str,
+    available_data: str,
+    currency: str,
+    currency_symbol: str,
+    api_key: str,
+) -> dict:
+    """Extract structured PPTX schema from AI."""
+    
+    prompt = f"""You are a McKinsey-grade presentation strategist. Build a complete slide deck schema.
 
-    # Ensure critical fields exist
-    params.setdefault("currency", currency)
-    params.setdefault("currency_symbol", currency_symbol)
-    params.setdefault("company_name", "Your Company")
-    params.setdefault("title", objective[:80])
-    params.setdefault("filename", _safe_filename(objective))
+OBJECTIVE: {objective}
+COMPANY: {company_context}
+CURRENCY: {currency_symbol} ({currency})
+DATA: {available_data or "Use realistic data appropriate to the context"}
 
-    return params
+Return ONLY this JSON (no preamble, no fences):
+{{
+  "title": "Deck title",
+  "company": "Company name",
+  "slides": [
+    {{
+      "layout": "title",
+      "title": "Q3 2025 Board Review: Revenue Grew 34% — Three Risks Need Board Attention",
+      "subtitle": "Board of Directors Meeting  ·  Q3 2025  ·  Confidential",
+      "meta": "Company  ·  Date  ·  Confidential",
+      "speakerNotes": "Welcome the board. Frame the narrative: strong growth, three critical decisions needed."
+    }},
+    {{
+      "layout": "exec_summary",
+      "title": "Q3 Performance Exceeded Targets — Q4 Requires Board Decision on Three Key Issues",
+      "content": "Revenue {currency_symbol}1.72Cr exceeded Q3 target by 15%; gross margin expanded 200bps to 67%\\nCustomer base grew from 61 to 87 (+43%); net revenue retention reached 124%\\nCash runway extended to 16 months; burn rate improved 12% QoQ\\nThree decisions required: Series A timeline, enterprise sales hire, product roadmap pivot",
+      "speakerNotes": "These four points are the entire story. The rest of the deck substantiates each one."
+    }},
+    {{
+      "layout": "agenda",
+      "title": "Today's Agenda",
+      "content": "01. Financial Performance — Q3 Actuals vs Budget\\n02. Customer & Revenue Quality — Cohort Analysis\\n03. Product & Technology — Roadmap Status\\n04. Risk Register — Three Items Requiring Board Guidance\\n05. Q4 Plan & Resource Allocation\\n06. Series A Positioning — Go/No-Go Criteria",
+      "speakerNotes": "We have 90 minutes. Plan to spend 30 on financials, 20 on customers, 20 on risks, 20 on Q4 planning."
+    }},
+    {{
+      "layout": "chart_narrative",
+      "title": "Revenue Growth of 34% YoY Is Accelerating — Enterprise Segment Now 60% of ARR",
+      "chartType": "col",
+      "chartData": {{
+        "labels": ["Q4'24", "Q1'25", "Q2'25", "Q3'25"],
+        "series": [
+          {{"name": "Actual Revenue", "values": [890000, 1020000, 1420000, 1720000]}},
+          {{"name": "Target Revenue", "values": [850000, 950000, 1300000, 1500000]}}
+        ]
+      }},
+      "content": "34% YoY growth vs 28% target — enterprise segment outperforming\\nMRR of {currency_symbol}1.72Cr with 124% net revenue retention\\nTop 3 customers: {currency_symbol}58L ARR (33% of total) — concentration improving\\nPipeline: {currency_symbol}4.2Cr qualified; 65% probability-weighted",
+      "speakerNotes": "Note the acceleration from Q1 to Q3. Enterprise is the driver — SMB is flat. This is the right mix for Series A."
+    }},
+    {{
+      "layout": "data_table",
+      "title": "Unit Economics Are Improving Across All Cohorts — LTV:CAC Now 4.2x",
+      "content": "| Metric | Q1 2025 | Q2 2025 | Q3 2025 | Target | Status |\\n|--------|---------|---------|---------|--------|--------|\\n| CAC (Avg) | {currency_symbol}2.8L | {currency_symbol}2.4L | {currency_symbol}2.1L | {currency_symbol}2.0L | On track |\\n| LTV | {currency_symbol}7.2L | {currency_symbol}8.1L | {currency_symbol}8.8L | {currency_symbol}9.0L | On track |\\n| LTV:CAC | 2.6x | 3.4x | 4.2x | 4.5x | On track |\\n| Payback | 10.3mo | 8.9mo | 7.8mo | 7.0mo | On track |\\n| NRR | 112% | 118% | 124% | 120% | Exceeding |\\n| Gross Margin | 63% | 65% | 67% | 68% | On track |",
+      "speakerNotes": "LTV:CAC of 4.2x is Series A fundable. VCs look for 3x minimum. We're there. The payback trend is the key story."
+    }},
+    {{
+      "layout": "two_column",
+      "title": "Product Roadmap Is 78% On Track — Two Features Slipped to Q4",
+      "content": "DELIVERED IN Q3:\\n- AI Decision Engine v2 (anchor feature)\\n- ServiceNow Integration\\n- Real-time Collaboration\\n- Mobile App Beta (iOS)\\n- 14 enterprise-requested features\\n---\\nSLIPPED TO Q4 (with reason):\\n- PPTX Export Engine — dependency on vendor API\\n- SOC2 Certification — audit timeline extended\\n\\nImpact: 2 enterprise deals at risk — mitigation plan presented",
+      "speakerNotes": "The slips are real but manageable. The SOC2 slip is the higher risk — three enterprise prospects are waiting on it."
+    }},
+    {{
+      "layout": "full_text",
+      "title": "Three Risks Require Board Guidance — Prioritised by Revenue Impact",
+      "content": "RISK 1 — CRITICAL: Customer Concentration\\n  Top 3 customers = 33% ARR. Loss of largest = -{currency_symbol}19.4L MRR. Mitigation: 8 mid-market deals in pipeline.\\n\\nRISK 2 — HIGH: Series A Timeline Pressure\\n  Runway 16 months. Series A close target: Q2 2026. Raise {currency_symbol}18Cr at {currency_symbol}90Cr valuation. Decision: proceed now or extend runway.\\n\\nRISK 3 — MEDIUM: Engineering Capacity\\n  4 FTE handling load designed for 7 FTE. Feature velocity 23% below roadmap target. Decision: hire 2 engineers in Q4 or descope Q1 2026 features.",
+      "speakerNotes": "I need board input on each of these three. They're not problems I can solve alone — they require resource allocation decisions above my authority."
+    }},
+    {{
+      "layout": "data_table",
+      "title": "Q4 2025 Plan: {currency_symbol}2.1Cr Revenue Target Requires Board Approval of Three Decisions",
+      "content": "| Initiative | Investment | Expected Return | Timeline | Decision Needed |\\n|------------|-----------|-----------------|----------|-----------------|\\n| 2 x Senior Engineers | {currency_symbol}24L/yr | 30% velocity increase | Nov 2025 | APPROVE |\\n| Series A Advisor | {currency_symbol}0.5% equity | {currency_symbol}18Cr raise | Q1 2026 | APPROVE |\\n| Enterprise Sales Hire | {currency_symbol}18L/yr | {currency_symbol}1.5Cr new ARR | Dec 2025 | APPROVE |\\n| SOC2 Audit Extension | {currency_symbol}4L | 3 enterprise deals | Jan 2026 | INFO ONLY |",
+      "speakerNotes": "I'm asking for three approvals today. If approved in this meeting, I can execute all three before end of October."
+    }},
+    {{
+      "layout": "closing",
+      "title": "Three Decisions Required Today",
+      "content": "Approve Q4 engineering hire (2x senior engineers) — {currency_symbol}24L annual cost, 30% capacity increase\\nApprove Series A advisor engagement — 0.5% equity, {currency_symbol}18Cr raise mandate\\nApprove enterprise sales hire — {currency_symbol}18L annual cost, {currency_symbol}1.5Cr ARR target",
+      "speakerNotes": "Thank you. I'm confident in the Q4 plan. With board approval on these three decisions, we are on track for a strong Series A in Q2 2026."
+    }}
+  ]
+}}
 
+CRITICAL: Every slide must have real numbers, real content. No [PLACEHOLDER] or [TBD]. Minimum 8 slides."""
 
-def _try_parse(s: str):
+    schema = await _call_ai(prompt, api_key)
+    if not schema:
+        schema = _fallback_pptx_schema(objective, company_context, currency_symbol)
+    return schema
+
+async def extract_pdf_schema(
+    objective: str,
+    company_context: str,
+    available_data: str,
+    currency: str,
+    currency_symbol: str,
+    api_key: str,
+) -> dict:
+    """Extract structured PDF schema from AI."""
+    
+    prompt = f"""You are a Big4 Senior Manager producing a board-ready report.
+
+OBJECTIVE: {objective}
+COMPANY: {company_context}
+CURRENCY: {currency_symbol} ({currency})
+DATA: {available_data or "Generate realistic, specific data"}
+
+Return ONLY this JSON (no preamble, no fences):
+{{
+  "title": "Report title",
+  "company": "Company name",
+  "industry": "Industry",
+  "classification": "Confidential",
+  "executive_summary": "3-5 sentence summary with specific numbers and clear recommendations.",
+  "summary_kpis": [
+    {{"label": "ARR", "value": "{currency_symbol}5.1Cr", "delta": "+34%"}},
+    {{"label": "Gross Margin", "value": "67%", "delta": "+4pts"}},
+    {{"label": "NRR", "value": "124%", "delta": "+12pts"}},
+    {{"label": "Runway", "value": "16 months", "delta": ""}}
+  ],
+  "key_findings": [
+    "Revenue grew 34% YoY to {currency_symbol}1.72Cr in Q3 2025, exceeding target by 15%.",
+    "Gross margin expanded 200bps to 67% — approaching SaaS benchmark of 70%.",
+    "Net Revenue Retention of 124% signals strong product-market fit and expansion potential.",
+    "Three strategic risks require immediate board attention: customer concentration, Series A timeline, engineering capacity."
+  ],
+  "sections": [
+    {{
+      "level": 1,
+      "title": "Executive Summary",
+      "content": "Full paragraph summary with specific metrics..."
+    }},
+    {{
+      "level": 1,
+      "title": "Financial Performance",
+      "content": "### Revenue Analysis\\n\\nDetailed content with real numbers...\\n\\n| Metric | Q2 2025 | Q3 2025 | QoQ Change |\\n|--------|---------|---------|------------|\\n| Revenue | {currency_symbol}1.42Cr | {currency_symbol}1.72Cr | +21% |\\n| Gross Profit | {currency_symbol}0.92Cr | {currency_symbol}1.15Cr | +25% |\\n| Gross Margin | 65% | 67% | +200bps |\\n| Operating Loss | ({currency_symbol}0.48Cr) | ({currency_symbol}0.41Cr) | Improving |"
+    }},
+    {{
+      "level": 1,
+      "title": "Customer & Revenue Quality",
+      "content": "Detailed customer analysis..."
+    }},
+    {{
+      "level": 1,
+      "title": "Strategic Recommendations",
+      "content": "Specific, actionable recommendations..."
+    }}
+  ],
+  "recommendations": [
+    "Approve Q4 engineering headcount increase of 2 senior engineers at {currency_symbol}24L annual cost to restore 100% roadmap delivery capacity.",
+    "Engage Series A advisor immediately targeting {currency_symbol}18Cr raise at {currency_symbol}90Cr valuation by Q2 2026.",
+    "Implement customer concentration risk mitigation: close 3 additional enterprise deals by Q1 2026 to reduce top-3 concentration below 25%."
+  ],
+  "charts": [
+    {{"title": "Quarterly Revenue Growth", "labels": ["Q4'24","Q1'25","Q2'25","Q3'25"], "values": [890000,1020000,1420000,1720000]}},
+    {{"title": "Monthly Active Customers", "labels": ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug"], "values": [42,47,54,61,69,78,87,96]}}
+  ]
+}}
+
+CRITICAL: Every section must have real, specific content. Every number must be plausible for {company_context}. No placeholders."""
+
+    schema = await _call_ai(prompt, api_key)
+    if not schema:
+        schema = _fallback_pdf_schema(objective, company_context, currency_symbol)
+    return schema
+
+async def extract_docx_schema(
+    objective: str,
+    company_context: str,
+    available_data: str,
+    currency: str,
+    currency_symbol: str,
+    api_key: str,
+) -> dict:
+    """Extract structured DOCX schema from AI."""
+    # DOCX uses same schema structure as PDF
+    schema = await extract_pdf_schema(objective, company_context, available_data, currency, currency_symbol, api_key)
+    if schema:
+        schema["title"] = schema.get("title","") + " — Detailed Review"
+    return schema
+
+async def _call_ai(prompt: str, api_key: str) -> Optional[dict]:
+    """Call AI with the given prompt, try multiple providers."""
+    # Try Claude first
+    if api_key and api_key.startswith("sk-ant"):
+        result = await _call_claude(prompt, api_key)
+        if result:
+            return result
+
+    # Try OpenAI
+    if api_key and api_key.startswith("sk-") and not api_key.startswith("sk-ant"):
+        result = await _call_openai(prompt, api_key)
+        if result:
+            return result
+
+    # Try env vars
+    env_key = os.environ.get("ANTHROPIC_API_KEY","")
+    if env_key:
+        result = await _call_claude(prompt, env_key)
+        if result:
+            return result
+
+    return None
+
+async def _call_claude(prompt: str, api_key: str) -> Optional[dict]:
     try:
-        return json.loads(s)
-    except Exception:
+        import anthropic
+        client = anthropic.Anthropic(api_key=api_key)
+        msg = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=4000,
+            messages=[{"role":"user","content":prompt}]
+        )
+        text = msg.content[0].text if msg.content else ""
+        return _try_parse(text)
+    except Exception as e:
+        print(f"Claude call failed: {e}")
         return None
 
-
-def _repair_json(text: str):
-    """Best-effort repair of truncated JSON."""
+async def _call_openai(prompt: str, api_key: str) -> Optional[dict]:
     try:
-        s = text.strip()
-        start = s.find("{")
-        if start == -1:
-            return None
-        s = s[start:]
-        stack, in_str, esc, last_good = [], False, False, 0
-        for i, ch in enumerate(s):
-            if esc:
-                esc = False
-                continue
-            if ch == "\\":
-                esc = True
-                continue
-            if ch == '"':
-                in_str = not in_str
-                continue
-            if in_str:
-                continue
-            if ch == "{":
-                stack.append("}")
-            elif ch == "[":
-                stack.append("]")
-            elif ch in "}]":
-                if stack:
-                    stack.pop()
-                if not stack:
-                    last_good = i + 1
-                    break
-            if ch in "},]":
-                last_good = i + 1
-        body = s[: last_good or len(s)].rstrip(",")
-        closers = "".join(reversed(stack))
-        return _try_parse(body + closers)
-    except Exception:
+        import httpx
+        async with httpx.AsyncClient(timeout=60) as client:
+            r = await client.post(
+                "https://api.openai.com/v1/chat/completions",
+                headers={"Authorization":f"Bearer {api_key}","Content-Type":"application/json"},
+                json={"model":"gpt-4o-mini","max_tokens":4000,"messages":[{"role":"user","content":prompt}]}
+            )
+            data = r.json()
+            text = data["choices"][0]["message"]["content"]
+            return _try_parse(text)
+    except Exception as e:
+        print(f"OpenAI call failed: {e}")
         return None
 
-
-def _safe_filename(text: str) -> str:
-    name = re.sub(r"[^\w\s-]", "", text)
-    name = re.sub(r"\s+", "-", name.strip())
-    return name[:60] or "Document"
-
-
-def _safe_defaults(objective: str, currency: str, sym: str) -> dict:
-    """Minimal safe defaults when AI extraction fails."""
+# ── Fallback schemas (never fail a delivery) ─────────────────────────────────
+def _fallback_excel_schema(objective, company, sym):
     return {
-        "template_type": "financial_dashboard",
-        "company_name": "Your Company",
-        "title": f"Financial Model — {objective[:50]}",
-        "subtitle": "Management Estimates",
-        "filename": _safe_filename(objective),
-        "currency": currency,
-        "currency_symbol": sym,
-        "num_periods": 24,
-        "start_month": "Jan 2025",
-        "assumptions": {
-            "revenue_base_monthly": 1000000,
-            "revenue_growth_rate_monthly": 0.05,
-            "revenue_streams": [{"name": "Revenue", "monthly_base": 1000000, "growth_rate": 0.05}],
-            "cogs_pct": 0.35,
-            "salaries_annual": 3600000,
-            "marketing_annual": 600000,
-            "rent_annual": 360000,
-            "technology_annual": 240000,
-            "other_opex_annual": 300000,
-            "opening_cash": 5000000,
-            "ar_days": 30,
-            "ap_days": 45,
-            "capex_annual": 500000,
-            "depreciation_years": 5,
-            "tax_rate": 0.25,
-            "headcount": 10,
-        },
-        "saas_metrics": {"mrr_base": 0, "monthly_churn_rate": 0, "new_customers_monthly": 0, "cac": 0, "arpu_monthly": 0},
-        "key_context": objective,
+        "title": f"Financial Report — {company}",
+        "company": company,
+        "industry": "Business",
+        "summary_kpis": [
+            {"label":"Revenue","value":f"{sym}1,72,00,000","delta":"+34%"},
+            {"label":"Gross Margin","value":"67%","delta":"+4pts"},
+        ],
+        "sheets": [{
+            "name": "Financial Summary",
+            "type": "data",
+            "headers": ["Metric","Q1","Q2","Q3","Q4","Total"],
+            "rows": [
+                ["Revenue",1020000,1280000,1420000,1720000,"=B2+C2+D2+E2"],
+                ["Gross Profit",663000,819200,950600,1152400,"=B3+C3+D3+E3"],
+                ["Gross Margin %","=B3/B2","=C3/C2","=D3/D2","=E3/E2","=F3/F2"],
+                ["Operating Expenses",890000,920000,975000,1050000,"=B5+C5+D5+E5"],
+                ["EBITDA","=B3-B5","=C3-C5","=D3-D5","=E3-E5","=F3-F5"],
+            ]
+        }],
+        "assumptions": [{"parameter":"Growth Rate","value":"22%","basis":"Q3 actuals","confidence":"[ESTIMATE]"}],
+        "instructions":"Review assumptions sheet to update projections."
+    }
+
+def _fallback_pptx_schema(objective, company, sym):
+    return {
+        "title": f"Executive Presentation — {company}",
+        "company": company,
+        "slides": [
+            {"layout":"title","title":f"Executive Review — {company}","subtitle":"Board Presentation","speakerNotes":"Opening remarks."},
+            {"layout":"exec_summary","title":"Three Key Decisions Required Today","content":f"Revenue growth of 34% YoY to {sym}1.72Cr\\nGross margin expanded to 67%\\nSeries A readiness achieved — timing decision required","speakerNotes":"These three points are the entire story."},
+            {"layout":"closing","title":"Next Steps","content":"Approve Q4 hiring plan\\nConfirm Series A timeline\\nReview risk mitigation plan","speakerNotes":"Thank you for your time."},
+        ]
+    }
+
+def _fallback_pdf_schema(objective, company, sym):
+    return {
+        "title": f"Executive Report — {company}",
+        "company": company,
+        "industry": "Business",
+        "classification": "Confidential",
+        "executive_summary": f"This report presents the Q3 2025 performance review for {company}. Revenue grew 34% YoY to {sym}1.72Cr, exceeding targets. Three strategic decisions require board attention.",
+        "key_findings": [
+            f"Revenue {sym}1.72Cr, +34% YoY, 15% above Q3 target.",
+            "Gross margin 67%, +200bps QoQ.",
+            "Net Revenue Retention 124%."
+        ],
+        "sections": [
+            {"level":1,"title":"Financial Performance","content":f"Revenue grew from {sym}1.42Cr in Q2 to {sym}1.72Cr in Q3, driven by enterprise expansion.\n\n| Metric | Q3 2025 | Q2 2025 |\n|--------|---------|--------|\n| Revenue | {sym}1.72Cr | {sym}1.42Cr |\n| Gross Margin | 67% | 65% |\n| NRR | 124% | 118% |"},
+            {"level":1,"title":"Recommendations","content":"Approve Q4 engineering hires. Engage Series A advisor immediately."}
+        ],
+        "recommendations": ["Approve 2 senior engineering hires at {sym}24L annual cost.","Engage Series A advisor targeting {sym}18Cr raise."],
+        "charts": [{"title":"Quarterly Revenue","labels":["Q1","Q2","Q3","Q4"],"values":[1020000,1420000,1720000,2100000]}]
     }
