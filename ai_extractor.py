@@ -441,3 +441,126 @@ def extract_blueprint(objective, ctx, data, api_key, sym="\u20b9"):
     if _FIN_KEYWORDS.search(objective):
         return None, "fallback_v4_template", reason
     return _fallback_blueprint_generic(objective, sym), "fallback", reason
+
+
+# ═════════════════════════════════════════════════════════════════
+# v4.2 DOCUMENT BLUEPRINTS — AI designs PPTX / PDF / DOCX structure
+# ═════════════════════════════════════════════════════════════════
+_PPTX_PROMPT = """You are a McKinsey-caliber presentation designer. Design a boardroom-quality PowerPoint BLUEPRINT for the request below. Output ONLY JSON.
+
+Schema:
+{{"title":"...","subtitle":"...",
+ "slides":[
+  {{"type":"bullets","h":"heading","kicker":"section label","points":["insight sentence",...3-5],"notes":"speaker note"}},
+  {{"type":"kpi","h":"...","kpis":[["label","value","delta"],...5-8],"notes":"..."}},
+  {{"type":"chart","h":"...","chart":{{"ctype":"bar|line|pie","title":"...","cats":["..."],"series":[["name",[numbers]]]}},"notes":"..."}},
+  {{"type":"table","h":"...","table":{{"rows":[["hdr",...],["...",...]]}},"notes":"..."}},
+  {{"type":"two_col","h":"...","left":["..."],"right":["..."],"notes":"..."}}
+ ]}}
+
+RULES:
+- 10-16 slides tailored EXACTLY to the request topic and audience. No generic filler.
+- At least 3 chart slides with realistic internally-consistent numbers for the domain (currency {sym}).
+- At least 1 kpi and 1 table slide. Every slide has a specific, useful speaker note.
+- Executive storytelling arc: situation → analysis → insight → recommendation → next steps.
+
+REQUEST: {obj}
+CONTEXT: {ctx}
+DATA: {data}
+"""
+
+_DOC_PROMPT = """You are a McKinsey-caliber consultant. Design a publication-quality {kind} BLUEPRINT for the request below. Output ONLY JSON.
+
+Schema:
+{{"title":"...","subtitle":"...",
+ "sections":[
+  {{"h":"heading","body":"3-6 sentence executive paragraph","bullets":["optional point",...0-6],
+    "table":{{"rows":[["hdr",...],["...",...]]}},
+    "chart":{{"ctype":"bar","title":"...","cats":["..."],"series":[["name",[numbers]]]}} }}
+ ]}}
+
+RULES:
+- 6-10 sections tailored EXACTLY to the request. Executive summary first, recommendations near the end.
+- Include at least 2 tables and 1 chart with realistic internally-consistent figures ({sym}).
+- Substantive analytical writing, no generic AI filler. table/chart keys optional per section.
+
+REQUEST: {obj}
+CONTEXT: {ctx}
+DATA: {data}
+"""
+
+
+def _model_to_pptx_bp(model, title, subtitle):
+    """Convert the v4 base/enriched model to a pptx blueprint (fallback floor)."""
+    months, rev, gross, ebitda = model["months"], model["rev"], model["gross"], model["ebitda"]
+    naps = model.get("narrative_points") or []
+    slides = [
+        {"type": "bullets", "h": "Executive Summary", "kicker": "Overview",
+         "points": [s["h"] + ": " + s["body"].split(".")[0] + "." for s in (model.get("sections") or [])[:4]] or
+                   ["Strong performance with expanding margins", "Growth funded by installed-base expansion"],
+         "notes": "Frame the quarter in 60 seconds."},
+        {"type": "kpi", "h": "KPI Scorecard", "kpis": model["kpis"][:8], "notes": "Highlight the two KPIs the audience tracks most."},
+        {"type": "chart", "h": "Revenue Trajectory",
+         "chart": {"ctype": "bar", "title": "Revenue & Gross Profit", "cats": months,
+                   "series": [["Revenue", rev], ["Gross Profit", gross]]}, "notes": "Sequential growth story."},
+        {"type": "chart", "h": "Profitability Trend",
+         "chart": {"ctype": "line", "title": "EBITDA by Month", "cats": months,
+                   "series": [["EBITDA", ebitda]]}, "notes": "Operating leverage in one chart."},
+    ]
+    for h, pts in naps[:3]:
+        slides.append({"type": "bullets", "h": h, "kicker": "Business Review",
+                       "points": pts[:5], "notes": f"Keep {h} to 90 seconds."})
+    slides.append({"type": "table", "h": "Risk Register",
+                   "table": {"rows": [["Risk", "Severity", "Mitigation"]] + [r[:3] for r in model["risks"][:5]]},
+                   "notes": "Surface the top risk proactively."})
+    slides.append({"type": "bullets", "h": "Recommendations", "kicker": "Decisions Requested",
+                   "points": model["recs"][:6], "notes": "Pause for discussion."})
+    return {"title": title, "subtitle": subtitle, "slides": slides}
+
+
+def _model_to_doc_bp(model, title, subtitle):
+    secs = list(model.get("sections") or [])
+    out = [{"h": s["h"], "body": s["body"]} for s in secs]
+    if out:
+        out[0]["table"] = {"rows": [["KPI", "Value", "Δ"]] + [k[:3] for k in model["kpis"][:8]]}
+    out.append({"h": "Risk Register", "body": "Principal risks and mitigations are summarized below.",
+                "table": {"rows": [["Risk", "Severity", "Mitigation"]] + [r[:3] for r in model["risks"][:6]]}})
+    out.append({"h": "Recommendations",
+                "body": "Management requests approval of the following actions.",
+                "bullets": model["recs"][:6],
+                "chart": {"ctype": "bar", "title": "Revenue by Month",
+                          "cats": model["months"], "series": [["Revenue", model["rev"]]]}})
+    return {"title": title, "subtitle": subtitle, "sections": out}
+
+
+def extract_doc_blueprint(fmt, objective, ctx, data, api_key, sym="\u20b9"):
+    """fmt in {'pptx','pdf','docx'}. Returns (blueprint, mode, reason). Never raises."""
+    try:
+        from doc_blueprint_engine import validate_pptx_blueprint, validate_doc_blueprint
+        if fmt == "pptx":
+            prompt = _PPTX_PROMPT.format(sym=sym, obj=objective[:5000], ctx=ctx[:2000],
+                                         data=(data[:6000] or "(none)"))
+            valid = validate_pptx_blueprint
+        else:
+            prompt = _DOC_PROMPT.format(kind=("PDF report" if fmt == "pdf" else "Word document"),
+                                        sym=sym, obj=objective[:5000], ctx=ctx[:2000],
+                                        data=(data[:6000] or "(none)"))
+            valid = validate_doc_blueprint
+        raw = _call_ai(prompt, api_key, max_tokens=12000)
+        if raw is not None:
+            bp = _try_parse(raw)
+            if valid(bp):
+                return bp, "ai", "ok"
+            reason = "AI doc blueprint invalid; model fallback used"
+        else:
+            reason = "no api key or AI call failed; model fallback used"
+    except Exception as e:
+        traceback.print_exc()
+        reason = f"doc blueprint exception: {str(e)[:100]}"
+    # Fallback: derive blueprint from the (possibly AI-enriched) base model
+    model, m2, r2 = extract(objective, ctx, data, api_key, sym)
+    title = model.get("title") or objective[:80] or "Business Document"
+    subtitle = "Prepared by OrchestrIQ"
+    bp = _model_to_pptx_bp(model, title, subtitle) if fmt == "pptx" else \
+         _model_to_doc_bp(model, title, subtitle)
+    return bp, "fallback", reason
