@@ -18,8 +18,9 @@ from excel_engine import build_excel
 from pptx_engine import build_pptx
 from pdf_engine import build_pdf
 from docx_engine import build_docx
+from blueprint_engine import render_blueprint
 
-VERSION = "4.0.0"
+VERSION = "4.1.0"
 
 app = FastAPI(title="OrchestrIQ Document Intelligence Engine", version=VERSION)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
@@ -95,7 +96,26 @@ def _pipeline(req: GenRequest, fmt: str) -> Response:
 
 
 @app.post("/generate/excel")
-def gen_excel(req: GenRequest): return _pipeline(req, "excel")
+def gen_excel(req: GenRequest):
+    """v4.1: AI-designed blueprint → generic renderer. Structure adapts to the
+    request (any domain, columns, row counts). v4 financial template is the
+    last-resort floor. Never raises, never 500s."""
+    try:
+        obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
+        sym = (req.currency_symbol or "\u20b9")[:4]
+        bp, mode, reason = ai_extractor.extract_blueprint(obj, ctx, data, req.api_key or "", sym)
+        if bp is not None:
+            try:
+                blob = render_blueprint(bp, sym)
+                return Response(content=blob, media_type=MIMES["excel"], status_code=200,
+                                headers={"X-Engine-Mode": mode, "X-Engine-Reason": reason[:120],
+                                         "X-Engine-Version": VERSION, "X-Engine-Path": "blueprint"})
+            except Exception as e:
+                traceback.print_exc()
+                reason = f"blueprint render failed: {str(e)[:80]}"
+    except Exception as e:
+        traceback.print_exc()
+    return _pipeline(req, "excel")
 
 
 @app.post("/generate/pptx")
