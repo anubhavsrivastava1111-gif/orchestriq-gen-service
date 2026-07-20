@@ -56,7 +56,7 @@ def is_media_only(text: str) -> bool:
 def sanitize_request(objective: str, company_context: str, available_data: str):
     """Sanitize all inbound fields. If available_data is media-only, drop it
     so engines rely on objective + fallback modeling instead of garbage."""
-    obj = sanitize_text(objective or "", 2000) or "Executive Business Review"
+    obj = sanitize_text(objective or "", 6000) or "Executive Business Review"
     ctx = sanitize_text(company_context or "", 3000)
     data = "" if is_media_only(available_data or "") else sanitize_text(available_data or "", 12000)
     return obj, ctx, data
