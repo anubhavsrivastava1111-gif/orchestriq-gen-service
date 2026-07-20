@@ -19,8 +19,10 @@ from pptx_engine import build_pptx
 from pdf_engine import build_pdf
 from docx_engine import build_docx
 from blueprint_engine import render_blueprint
+from doc_blueprint_engine import (render_pptx_blueprint, render_pdf_blueprint,
+                                  render_docx_blueprint)
 
-VERSION = "4.1.0"
+VERSION = "4.2.0"
 
 app = FastAPI(title="OrchestrIQ Document Intelligence Engine", version=VERSION)
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
@@ -118,13 +120,39 @@ def gen_excel(req: GenRequest):
     return _pipeline(req, "excel")
 
 
+def _doc_blueprint_pipeline(req: GenRequest, fmt: str) -> Response:
+    """v4.2: AI designs the document structure per request; generic renderer
+    builds it. v4 template pipeline is the last-resort floor. Never 500s."""
+    renderers = {"pptx": render_pptx_blueprint, "pdf": render_pdf_blueprint,
+                 "docx": render_docx_blueprint}
+    try:
+        obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
+        sym = (req.currency_symbol or "\u20b9")[:4]
+        bp, mode, reason = ai_extractor.extract_doc_blueprint(fmt, obj, ctx, data,
+                                                              req.api_key or "", sym)
+        if req.title:
+            bp["title"] = req.title[:90]
+        if req.subtitle:
+            bp["subtitle"] = req.subtitle[:90]
+        try:
+            blob = renderers[fmt](bp)
+            return Response(content=blob, media_type=MIMES[fmt], status_code=200,
+                            headers={"X-Engine-Mode": mode, "X-Engine-Reason": reason[:120],
+                                     "X-Engine-Version": VERSION, "X-Engine-Path": "blueprint"})
+        except Exception as e:
+            traceback.print_exc()
+    except Exception:
+        traceback.print_exc()
+    return _pipeline(req, fmt)
+
+
 @app.post("/generate/pptx")
-def gen_pptx(req: GenRequest): return _pipeline(req, "pptx")
+def gen_pptx(req: GenRequest): return _doc_blueprint_pipeline(req, "pptx")
 
 
 @app.post("/generate/pdf")
-def gen_pdf(req: GenRequest): return _pipeline(req, "pdf")
+def gen_pdf(req: GenRequest): return _doc_blueprint_pipeline(req, "pdf")
 
 
 @app.post("/generate/docx")
-def gen_docx(req: GenRequest): return _pipeline(req, "docx")
+def gen_docx(req: GenRequest): return _doc_blueprint_pipeline(req, "docx")
