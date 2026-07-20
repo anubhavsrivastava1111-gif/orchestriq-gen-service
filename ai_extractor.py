@@ -235,3 +235,209 @@ def extract(objective, ctx, data, api_key, sym="₹"):
     except Exception as e:
         traceback.print_exc()
         return _base_model(objective, sym), "fallback", f"extractor exception: {str(e)[:120]}"
+
+
+# ═════════════════════════════════════════════════════════════════
+# v4.1 BLUEPRINT EXTRACTION — AI designs the workbook structure
+# ═════════════════════════════════════════════════════════════════
+_BP_PROMPT = """You are a McKinsey-caliber analyst and Excel architect. Design a complete Excel workbook BLUEPRINT for the request below. Output ONLY JSON (no markdown, no prose).
+
+Blueprint schema:
+{{
+ "title": "workbook title",
+ "sheets": [
+  {{"name":"Assumptions","type":"kv","rows":[["label",value,"rationale"],...8-15 rows]}},
+  {{"name":"<Data sheet name>","type":"table","row_count":<N from request, default 50, max 500>,
+   "columns":[
+     {{"h":"<header>","gen":{{"kind":"id","prefix":"EMP-","start":1001}}}},
+     {{"h":"<header>","gen":{{"kind":"name"}}}},
+     {{"h":"<header>","gen":{{"kind":"choice","values":["...5-8 realistic values..."]}}}},
+     {{"h":"<header>","gen":{{"kind":"choice_dependent","on":"<other col>","map":{{"<val>":["..."]}},"default":["..."]}}}},
+     {{"h":"<header>","gen":{{"kind":"number","min":X,"max":Y,"decimals":D}},"format":"number|hours|currency|percent"}},
+     {{"h":"<calculated header>","formula":"{{Col A}}-{{Col B}}","format":"number"}}
+   ]}},
+  {{"name":"<Group> Summary","type":"summary","source":"<data sheet name>","group_by":"<choice column>",
+   "aggregates":[{{"h":"Headcount","kind":"count"}},{{"h":"Total X","kind":"sum","col":"<col>","format":"number"}},{{"h":"Avg Y","kind":"avg","col":"<col>","format":"percent"}}]}},
+  {{"name":"Dashboard","type":"dashboard",
+   "kpis":[{{"label":"...","ref":{{"sheet":"<data sheet>","agg":"count|sum|avg","col":"<col>"}},"format":"..."}} ...8-12 kpis],
+   "charts":[{{"title":"...","type":"bar|line|pie","source":"<summary sheet>","cat_col":"<group>","val_col":"<agg header>"}} ...2-4 charts]}}
+ ]
+}}
+
+RULES:
+- Include EVERY column the user listed, in their order. Requested calculated fields use "formula" with {{Column Name}} tokens referencing THIS sheet's columns (native Excel math only: + - * / and parentheses; IFERROR allowed).
+- percent-format columns use decimals 2-3 with min/max between 0 and 1.
+- Honor requested row counts and category counts exactly (e.g. "150 employees across 5 departments" → row_count 150, 5 department values).
+- Realistic values for the domain, currency amounts sized for {sym}.
+- 2-3 summary sheets if multiple groupings are requested (department, team, etc).
+- Dashboard KPIs must cover the user's requested dashboard metrics.
+
+REQUEST:
+{obj}
+
+CONTEXT: {ctx}
+DATA PROVIDED:
+{data}
+"""
+
+
+def _fallback_blueprint_workforce(objective, sym):
+    """Deterministic workforce/FTE blueprint — parses N employees and dept count."""
+    m = re.search(r'(\d{2,4})\s*(?:employees|staff|agents|workers|people)', objective, re.I)
+    n = min(int(m.group(1)), 500) if m else 150
+    m2 = re.search(r'(\d{1,2})\s*departments?', objective, re.I)
+    nd = min(int(m2.group(1)), 8) if m2 else 5
+    depts = ["Customer Support", "Technical Support", "Sales Operations",
+             "Back Office", "Quality Assurance", "Finance Ops", "HR Services",
+             "IT Helpdesk"][:nd]
+    team_map = {d: [f"{d.split()[0]} Team {i}" for i in (1, 2, 3)] for d in depts}
+    cols = [
+        {"h": "Employee ID", "gen": {"kind": "id", "prefix": "EMP-", "start": 10001}},
+        {"h": "Employee Name", "gen": {"kind": "name"}},
+        {"h": "Department", "gen": {"kind": "choice", "values": depts, "sequential": True}},
+        {"h": "Team", "gen": {"kind": "choice_dependent", "on": "Department", "map": team_map, "default": ["Team 1"]}},
+        {"h": "Manager", "gen": {"kind": "name"}},
+        {"h": "Location", "gen": {"kind": "choice", "values": ["Lucknow", "Noida", "Bengaluru", "Hyderabad", "Manila"]}},
+        {"h": "Shift", "gen": {"kind": "choice", "values": ["Morning", "Evening", "Night", "Split"]}},
+        {"h": "Employment Type", "gen": {"kind": "choice", "values": ["Full-time", "Full-time", "Full-time", "Part-time"]}},
+        {"h": "Planned Working Days", "gen": {"kind": "number", "min": 22, "max": 22}},
+        {"h": "Actual Working Days", "gen": {"kind": "number", "min": 19, "max": 22}},
+        {"h": "Scheduled Hours", "formula": "{Planned Working Days}*8", "format": "hours"},
+        {"h": "Leave Hours", "gen": {"kind": "number", "min": 0, "max": 24}, "format": "hours"},
+        {"h": "Training Hours", "gen": {"kind": "number", "min": 4, "max": 10}, "format": "hours"},
+        {"h": "Meeting Hours", "gen": {"kind": "number", "min": 4, "max": 8}, "format": "hours"},
+        {"h": "Break Hours", "formula": "{Actual Working Days}*1.5", "format": "hours"},
+        {"h": "Overtime Hours", "gen": {"kind": "number", "min": 0, "max": 16}, "format": "hours"},
+        {"h": "Available Hours", "formula": "{Scheduled Hours}-{Leave Hours}", "format": "hours"},
+        {"h": "Shrinkage Hours", "formula": "{Training Hours}+{Meeting Hours}+{Break Hours}", "format": "hours"},
+        {"h": "Capacity Hours", "formula": "{Available Hours}-{Shrinkage Hours}", "format": "hours"},
+        {"h": "Occupancy %", "gen": {"kind": "number", "min": 0.74, "max": 0.9, "decimals": 3}, "format": "percent"},
+        {"h": "Productive Hours", "formula": "{Capacity Hours}*{Occupancy %}", "format": "hours"},
+        {"h": "Lost Hours", "formula": "{Capacity Hours}-{Productive Hours}", "format": "hours"},
+        {"h": "Billable Hours", "formula": "{Productive Hours}*0.85", "format": "hours"},
+        {"h": "Non-Billable Hours", "formula": "{Productive Hours}*0.15", "format": "hours"},
+        {"h": "Attendance %", "formula": "IFERROR({Actual Working Days}/{Planned Working Days},0)", "format": "percent"},
+        {"h": "Utilization %", "formula": "IFERROR({Productive Hours}/{Available Hours},0)", "format": "percent"},
+        {"h": "Shrinkage %", "formula": "IFERROR({Shrinkage Hours}/{Available Hours},0)", "format": "percent"},
+        {"h": "FTE", "formula": "IFERROR({Available Hours}/176,0)", "format": "decimal"},
+        {"h": "Hourly Cost", "gen": {"kind": "number", "min": 180, "max": 650}, "format": "currency"},
+        {"h": "Monthly Salary", "formula": "{Hourly Cost}*{Scheduled Hours}", "format": "currency"},
+        {"h": "Cost per Productive Hour", "formula": "IFERROR({Monthly Salary}/{Productive Hours},0)", "format": "currency"},
+        {"h": "Variance vs 85% Target", "formula": "{Utilization %}-0.85", "format": "percent"},
+        {"h": "Cost Center", "gen": {"kind": "choice", "values": ["CC-1001", "CC-1002", "CC-1003", "CC-1004", "CC-1005"]}},
+    ]
+    aggs = [
+        {"h": "Headcount", "kind": "count"},
+        {"h": "Total FTE", "kind": "sum", "col": "FTE", "format": "decimal"},
+        {"h": "Capacity Hours", "kind": "sum", "col": "Capacity Hours", "format": "hours"},
+        {"h": "Productive Hours", "kind": "sum", "col": "Productive Hours", "format": "hours"},
+        {"h": "Lost Hours", "kind": "sum", "col": "Lost Hours", "format": "hours"},
+        {"h": "Avg Utilization", "kind": "avg", "col": "Utilization %", "format": "percent"},
+        {"h": "Avg Occupancy", "kind": "avg", "col": "Occupancy %", "format": "percent"},
+        {"h": "Avg Shrinkage", "kind": "avg", "col": "Shrinkage %", "format": "percent"},
+        {"h": "Payroll Cost", "kind": "sum", "col": "Monthly Salary", "format": "currency"},
+    ]
+    return {
+        "title": objective[:80] or "Workforce Capacity Planning & FTE Calculator",
+        "sheets": [
+            {"name": "Assumptions", "type": "kv", "rows": [
+                ["Standard work hours/day", 8, "Company policy"],
+                ["Working days/month", 22, "Excluding weekends & holidays"],
+                ["Lunch break/day", "1 hour", "Unpaid"],
+                ["Tea breaks/day", "30 min", "Paid"],
+                ["Team meetings/month", "6 hours", "All-hands + team syncs"],
+                ["Training/month", "8 hours", "Compliance + upskilling"],
+                ["FTE basis", "176 hours", "22 days x 8 hours"],
+                ["Target occupancy", "82%", "Industry benchmark"],
+                ["Target shrinkage", "18%", "Industry benchmark"],
+                ["Target utilization", "85%", "Board-approved target"],
+                ["Currency", sym, "Reporting currency"]]},
+            {"name": "Employee Data", "type": "table", "row_count": n, "columns": cols},
+            {"name": "Department Summary", "type": "summary", "source": "Employee Data",
+             "group_by": "Department", "aggregates": aggs},
+            {"name": "Shift Summary", "type": "summary", "source": "Employee Data",
+             "group_by": "Shift", "aggregates": aggs[:6]},
+            {"name": "Dashboard", "type": "dashboard",
+             "kpis": [
+                 {"label": "Total Employees", "ref": {"sheet": "Employee Data", "agg": "count", "col": "Employee ID"}},
+                 {"label": "Total FTE", "ref": {"sheet": "Employee Data", "agg": "sum", "col": "FTE"}, "format": "decimal"},
+                 {"label": "Capacity Hours", "ref": {"sheet": "Employee Data", "agg": "sum", "col": "Capacity Hours"}, "format": "hours"},
+                 {"label": "Productive Hours", "ref": {"sheet": "Employee Data", "agg": "sum", "col": "Productive Hours"}, "format": "hours"},
+                 {"label": "Lost Hours", "ref": {"sheet": "Employee Data", "agg": "sum", "col": "Lost Hours"}, "format": "hours"},
+                 {"label": "Avg Utilization", "ref": {"sheet": "Employee Data", "agg": "avg", "col": "Utilization %"}, "format": "percent"},
+                 {"label": "Avg Occupancy", "ref": {"sheet": "Employee Data", "agg": "avg", "col": "Occupancy %"}, "format": "percent"},
+                 {"label": "Avg Shrinkage", "ref": {"sheet": "Employee Data", "agg": "avg", "col": "Shrinkage %"}, "format": "percent"},
+                 {"label": "Total Payroll", "ref": {"sheet": "Employee Data", "agg": "sum", "col": "Monthly Salary"}, "format": "currency"},
+                 {"label": "Total Overtime Hrs", "ref": {"sheet": "Employee Data", "agg": "sum", "col": "Overtime Hours"}, "format": "hours"},
+                 {"label": "Total Leave Hrs", "ref": {"sheet": "Employee Data", "agg": "sum", "col": "Leave Hours"}, "format": "hours"},
+                 {"label": "Avg Attendance", "ref": {"sheet": "Employee Data", "agg": "avg", "col": "Attendance %"}, "format": "percent"}],
+             "charts": [
+                 {"title": "FTE by Department", "type": "bar", "source": "Department Summary", "val_col": "Total FTE"},
+                 {"title": "Avg Utilization by Department", "type": "bar", "source": "Department Summary", "val_col": "Avg Utilization"},
+                 {"title": "Payroll Cost by Department", "type": "pie", "source": "Department Summary", "val_col": "Payroll Cost"},
+                 {"title": "Headcount by Shift", "type": "bar", "source": "Shift Summary", "val_col": "Headcount"}]}
+        ]}
+
+
+def _fallback_blueprint_generic(objective, sym):
+    """Generic analysis workbook when domain is unknown."""
+    return {
+        "title": objective[:80] or "Business Analysis Workbook",
+        "sheets": [
+            {"name": "Assumptions", "type": "kv", "rows": [
+                ["Scope", objective[:70] or "Business analysis", "From request"],
+                ["Currency", sym, "Reporting currency"],
+                ["Period", "Current month", "Default"]]},
+            {"name": "Data", "type": "table", "row_count": 50, "columns": [
+                {"h": "Item ID", "gen": {"kind": "id", "prefix": "ITM-", "start": 1001}},
+                {"h": "Category", "gen": {"kind": "choice", "values": ["Category A", "Category B", "Category C", "Category D"]}},
+                {"h": "Owner", "gen": {"kind": "name"}},
+                {"h": "Quantity", "gen": {"kind": "number", "min": 10, "max": 500}, "format": "number"},
+                {"h": "Unit Value", "gen": {"kind": "number", "min": 100, "max": 5000}, "format": "currency"},
+                {"h": "Total Value", "formula": "{Quantity}*{Unit Value}", "format": "currency"},
+                {"h": "Score %", "gen": {"kind": "number", "min": 0.4, "max": 0.98, "decimals": 3}, "format": "percent"}]},
+            {"name": "Category Summary", "type": "summary", "source": "Data",
+             "group_by": "Category", "aggregates": [
+                 {"h": "Count", "kind": "count"},
+                 {"h": "Total Value", "kind": "sum", "col": "Total Value", "format": "currency"},
+                 {"h": "Avg Score", "kind": "avg", "col": "Score %", "format": "percent"}]},
+            {"name": "Dashboard", "type": "dashboard", "kpis": [
+                {"label": "Total Items", "ref": {"sheet": "Data", "agg": "count", "col": "Item ID"}},
+                {"label": "Total Value", "ref": {"sheet": "Data", "agg": "sum", "col": "Total Value"}, "format": "currency"},
+                {"label": "Avg Score", "ref": {"sheet": "Data", "agg": "avg", "col": "Score %"}, "format": "percent"}],
+             "charts": [
+                 {"title": "Value by Category", "type": "bar", "source": "Category Summary", "val_col": "Total Value"}]}
+        ]}
+
+
+_WF_KEYWORDS = re.compile(r'\b(workforce|fte|employee|staffing|headcount|shrinkage|occupancy|roster|capacity plan|wfm|attendance)\b', re.I)
+_FIN_KEYWORDS = re.compile(r'\b(board|quarterly|p&l|profit|cash flow|financial statement|budget|forecast|investor|revenue model)\b', re.I)
+
+
+def extract_blueprint(objective, ctx, data, api_key, sym="\u20b9"):
+    """Returns (blueprint, mode, reason). NEVER raises.
+    AI designs the structure; deterministic fallbacks by domain keywords."""
+    try:
+        from blueprint_engine import validate_blueprint
+        raw = _call_ai(_BP_PROMPT.format(sym=sym, obj=objective[:5000],
+                                         ctx=ctx[:2000], data=(data[:6000] or "(none)")),
+                       api_key, max_tokens=14000)
+        if raw is not None:
+            bp = _try_parse(raw)
+            if validate_blueprint(bp):
+                # cap row counts
+                for s in bp.get("sheets", []):
+                    if isinstance(s, dict) and s.get("type") == "table":
+                        s["row_count"] = min(int(s.get("row_count", 50) or 50), 500)
+                return bp, "ai", "ok"
+            reason = "AI blueprint invalid; domain fallback used"
+        else:
+            reason = "no api key or AI call failed; domain fallback used"
+    except Exception as e:
+        traceback.print_exc()
+        reason = f"blueprint exception: {str(e)[:100]}"
+    if _WF_KEYWORDS.search(objective):
+        return _fallback_blueprint_workforce(objective, sym), "fallback", reason
+    if _FIN_KEYWORDS.search(objective):
+        return None, "fallback_v4_template", reason
+    return _fallback_blueprint_generic(objective, sym), "fallback", reason
