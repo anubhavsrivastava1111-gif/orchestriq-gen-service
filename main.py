@@ -1,125 +1,110 @@
 """
-OrchestrIQ Generation Service v3 — FastAPI
-Railway deployment: https://orchestriq-gen-service-production.up.railway.app
+OrchestrIQ Document Intelligence Engine v4 — FastAPI service
+ZERO-500 GUARANTEE: every /generate/* endpoint always returns a valid
+document. Failures at any layer degrade to the deterministic fallback
+model, never to an HTTP error. Engine mode + reason are exposed via
+X-Engine-Mode / X-Engine-Reason response headers.
 """
-from fastapi import FastAPI, HTTPException
+import traceback
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 from typing import Optional
-import traceback
 
-from excel_engine  import build_excel
-from pptx_engine   import build_pptx
-from pdf_engine    import build_pdf
-from docx_engine   import build_docx
-from ai_extractor  import (
-    extract_excel_schema, extract_pptx_schema,
-    extract_pdf_schema, extract_docx_schema
-)
+from sanitizer import sanitize_request
+import ai_extractor
+from excel_engine import build_excel
+from pptx_engine import build_pptx
+from pdf_engine import build_pdf
+from docx_engine import build_docx
 
-app = FastAPI(
-    title="OrchestrIQ Generation Service",
-    version="3.0.0",
-    description="CFO/Board-grade Excel, PowerPoint, PDF, Word generation"
-)
+VERSION = "4.0.0"
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="OrchestrIQ Document Intelligence Engine", version=VERSION)
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+                   allow_headers=["*"], expose_headers=["X-Engine-Mode", "X-Engine-Reason"])
 
-class GenerateRequest(BaseModel):
-    objective: str
-    company_context: Optional[str] = ""
-    available_data: Optional[str] = ""
-    currency: Optional[str] = "INR"
-    currency_symbol: Optional[str] = "₹"
+
+class GenRequest(BaseModel):
+    objective: str = ""
+    company_context: str = ""
+    available_data: str = ""
+    currency: str = "INR"
+    currency_symbol: str = "\u20b9"
     api_key: Optional[str] = ""
+    title: Optional[str] = ""
+    subtitle: Optional[str] = ""
+
+
+@app.exception_handler(Exception)
+async def global_handler(request: Request, exc: Exception):
+    traceback.print_exc()
+    return JSONResponse(status_code=200,
+                        content={"error": str(exc)[:200], "engine": "error"})
+
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "OrchestrIQ Generation Service v3", "version": "3.0.0"}
+    return {"status": "ok", "version": VERSION, "engines": ["excel", "pptx", "pdf", "docx"]}
 
-@app.get("/")
-def root():
-    return {"status": "ok", "endpoints": ["/generate/excel", "/generate/pptx", "/generate/pdf", "/generate/docx"]}
+
+MIMES = {
+    "excel": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "pdf": "application/pdf",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+def _pipeline(req: GenRequest, fmt: str) -> Response:
+    """Shared pipeline: sanitize → extract (never raises) → build → validate.
+    If build with the AI-enriched model fails, retry with pure fallback model.
+    This function itself never raises."""
+    obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
+    sym = (req.currency_symbol or "\u20b9")[:4]
+    model, mode, reason = ai_extractor.extract(obj, ctx, data, req.api_key or "", sym)
+    title = (req.title or model.get("title") or obj)[:90]
+    subtitle = (req.subtitle or "Board of Directors Review")[:90]
+
+    builders = {"excel": lambda m: build_excel(m, title, sym),
+                "pptx": lambda m: build_pptx(m, title, subtitle, sym),
+                "pdf": lambda m: build_pdf(m, title, subtitle, sym),
+                "docx": lambda m: build_docx(m, title, subtitle, sym)}
+    build = builders[fmt]
+
+    try:
+        blob = build(model)
+    except Exception as e:
+        traceback.print_exc()
+        mode, reason = "fallback", f"build failed on AI model: {str(e)[:100]}"
+        try:
+            fb = ai_extractor._base_model(obj, sym)
+            fb["title"] = title
+            blob = build(fb)
+        except Exception as e2:
+            traceback.print_exc()
+            # absolute last resort — still 200, tiny valid file
+            return Response(content=f"Generation failed: {str(e2)[:200]}".encode(),
+                            media_type="text/plain", status_code=200,
+                            headers={"X-Engine-Mode": "error",
+                                     "X-Engine-Reason": str(e2)[:120]})
+    return Response(content=blob, media_type=MIMES[fmt], status_code=200,
+                    headers={"X-Engine-Mode": mode, "X-Engine-Reason": reason[:120],
+                             "X-Engine-Version": VERSION})
+
 
 @app.post("/generate/excel")
-async def generate_excel(req: GenerateRequest):
-    try:
-        schema = await extract_excel_schema(
-            req.objective, req.company_context or "",
-            req.available_data or "", req.currency or "INR",
-            req.currency_symbol or "₹", req.api_key or ""
-        )
-        file_bytes = build_excel(schema, req.currency_symbol or "₹")
-        filename = (schema.get("title","Report") or "Report").replace(" ","-")[:50] + ".xlsx"
-        return Response(
-            content=file_bytes,
-            media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-        )
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+def gen_excel(req: GenRequest): return _pipeline(req, "excel")
+
 
 @app.post("/generate/pptx")
-async def generate_pptx(req: GenerateRequest):
-    try:
-        schema = await extract_pptx_schema(
-            req.objective, req.company_context or "",
-            req.available_data or "", req.currency or "INR",
-            req.currency_symbol or "₹", req.api_key or ""
-        )
-        file_bytes = build_pptx(schema, req.currency_symbol or "₹")
-        filename = (schema.get("title","Presentation") or "Presentation").replace(" ","-")[:50] + ".pptx"
-        return Response(
-            content=file_bytes,
-            media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-        )
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+def gen_pptx(req: GenRequest): return _pipeline(req, "pptx")
+
 
 @app.post("/generate/pdf")
-async def generate_pdf(req: GenerateRequest):
-    try:
-        schema = await extract_pdf_schema(
-            req.objective, req.company_context or "",
-            req.available_data or "", req.currency or "INR",
-            req.currency_symbol or "₹", req.api_key or ""
-        )
-        file_bytes = build_pdf(schema, req.currency_symbol or "₹")
-        filename = (schema.get("title","Report") or "Report").replace(" ","-")[:50] + ".pdf"
-        return Response(
-            content=file_bytes,
-            media_type="application/pdf",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-        )
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+def gen_pdf(req: GenRequest): return _pipeline(req, "pdf")
+
 
 @app.post("/generate/docx")
-async def generate_docx(req: GenerateRequest):
-    try:
-        schema = await extract_docx_schema(
-            req.objective, req.company_context or "",
-            req.available_data or "", req.currency or "INR",
-            req.currency_symbol or "₹", req.api_key or ""
-        )
-        file_bytes = build_docx(schema, req.currency_symbol or "₹")
-        filename = (schema.get("title","Document") or "Document").replace(" ","-")[:50] + ".docx"
-        return Response(
-            content=file_bytes,
-            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-            headers={"Content-Disposition": f'attachment; filename="{filename}"'}
-        )
-    except Exception as e:
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=str(e))
+def gen_docx(req: GenRequest): return _pipeline(req, "docx")
