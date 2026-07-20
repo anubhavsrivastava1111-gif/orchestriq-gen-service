@@ -141,6 +141,11 @@ def render_blueprint(bp: dict, currency_symbol: str = "\u20b9") -> bytes:
         name = str(spec.get("name", "Sheet"))[:28]
         ws = wb.create_sheet(name)
 
+        if st == "vba":
+            wb.remove(ws)
+            render_vba_sheet(wb, spec)
+            continue
+
         if st == "kv":
             _title(ws, name)
             r = 3
@@ -329,3 +334,28 @@ def validate_blueprint(bp) -> bool:
     has_table = any(s.get("type") == "table" and s.get("columns") for s in sheets
                     if isinstance(s, dict))
     return has_table
+
+
+# ── v4.2: VBA/Automation sheet type ──────────────────────────────
+# openpyxl cannot embed a compiled vbaProject.bin into a new workbook, so
+# automation requests get an "Automation (VBA)" sheet carrying ready-to-paste
+# VBA modules + install instructions. Honest, works everywhere, no corruption.
+def render_vba_sheet(wb, spec):
+    from openpyxl.styles import Font, PatternFill, Border
+    ws = wb.create_sheet(str(spec.get("name", "Automation (VBA)"))[:28])
+    ws["A1"] = "Automation — VBA modules (copy into Alt+F11 → Insert → Module)"
+    ws["A1"].font = Font(bold=True, size=13, color="1E3A5F")
+    ws["A2"] = "Then save the file as .xlsm (macro-enabled). Each module below is complete and ready to run."
+    ws["A2"].font = Font(size=9, color="64748B", italic=True)
+    r = 4
+    for m in (spec.get("modules") or [])[:6]:
+        ws.cell(row=r, column=1, value="Module: " + str(m.get("name", "Macro"))[:50]).font = \
+            Font(bold=True, size=11, color="0F6E56")
+        r += 1
+        for line in str(m.get("code", ""))[:6000].split("\n")[:120]:
+            c = ws.cell(row=r, column=1, value=line)
+            c.font = Font(name="Consolas", size=9)
+            r += 1
+        r += 2
+    ws.column_dimensions["A"].width = 110
+    return ws
