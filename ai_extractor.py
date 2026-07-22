@@ -1,11 +1,25 @@
 """
-OrchestrIQ Document Intelligence Engine v4 — AI Schema Extractor
+OrchestrIQ Document Intelligence Engine v4.3 - AI Schema Extractor
 ZERO-RAISE GUARANTEE: this module never raises. Any failure at any layer
 returns (fallback_schema, reason_string). Callers always get a usable schema.
+
+v4.3 additions:
+- domain_detector: picks appropriate fallback model per business domain
+- layout_engine: post-processes blueprints with theme + smart chart selection
 """
 import json
 import re
 import traceback
+
+try:
+    import domain_detector  # flat-file import
+except Exception:
+    domain_detector = None
+
+try:
+    import layout_engine  # flat-file import
+except Exception:
+    layout_engine = None
 
 MODEL = "claude-haiku-4-5-20251001"
 
@@ -48,7 +62,12 @@ def _try_parse(raw: str):
 
 
 def _call_ai(prompt: str, api_key: str, max_tokens: int = 8000):
-    """Call Claude. Returns raw text or None. Never raises."""
+    """Call Claude. Returns raw text or None. Never raises.
+    Falls back to the ANTHROPIC_API_KEY environment variable so the
+    intelligence layer works even when the frontend sends no key."""
+    import os
+    if not api_key or len(api_key) < 20:
+        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key or len(api_key) < 20:
         return None
     try:
@@ -175,7 +194,7 @@ _PROMPT = """You are a McKinsey-caliber financial analyst. Based on the objectiv
  "narrative_points": [["section heading",["point","point","point"]], ...4-6 groups]
 }}
 
-Use the currency symbol {sym}. All numbers must be internally consistent. Derive real figures from the data if present; otherwise create realistic consistent figures for the business described.
+Use the currency symbol {sym}. CRITICAL: if DATA below contains figures, use EXACTLY those figures everywhere (no invented numbers); derive additional values only via arithmetic on them. Otherwise create realistic consistent figures. All numbers internally consistent.
 
 OBJECTIVE: {obj}
 COMPANY CONTEXT: {ctx}
@@ -193,9 +212,19 @@ def extract(objective, ctx, data, api_key, sym="₹"):
                                       ctx=ctx[:2000], data=data[:8000] or "(none)"),
                        api_key)
         if raw is None:
+            if domain_detector is not None:
+                try:
+                    return domain_detector.get_fallback_model(objective, sym), "fallback", "no api key or AI call failed (domain fallback)"
+                except Exception:
+                    pass
             return base, "fallback", "no api key or AI call failed"
         parsed = _try_parse(raw)
         if not isinstance(parsed, dict):
+            if domain_detector is not None:
+                try:
+                    return domain_detector.get_fallback_model(objective, sym), "fallback", "AI returned unparseable JSON (domain fallback)"
+                except Exception:
+                    pass
             return base, "fallback", "AI returned unparseable JSON"
         # merge validated fields over base
         def _ok_list(v, n=1):
@@ -234,6 +263,11 @@ def extract(objective, ctx, data, api_key, sym="₹"):
         return base, "ai", "ok"
     except Exception as e:
         traceback.print_exc()
+        if domain_detector is not None:
+            try:
+                return domain_detector.get_fallback_model(objective, sym), "fallback", f"extractor exception: {str(e)[:120]} (domain fallback)"
+            except Exception:
+                pass
         return _base_model(objective, sym), "fallback", f"extractor exception: {str(e)[:120]}"
 
 
@@ -268,7 +302,7 @@ RULES:
 - Include EVERY column the user listed, in their order. Requested calculated fields use "formula" with {{Column Name}} tokens referencing THIS sheet's columns (native Excel math only: + - * / and parentheses; IFERROR allowed).
 - percent-format columns use decimals 2-3 with min/max between 0 and 1.
 - Honor requested row counts and category counts exactly (e.g. "150 employees across 5 departments" → row_count 150, 5 department values).
-- Realistic values for the domain, currency amounts sized for {sym}.
+- Realistic values for the domain, currency amounts sized for {sym}. CRITICAL: if DATA PROVIDED contains actual figures or tables, reproduce EXACTLY those values in the workbook (as const gen kinds or kv rows), not invented ones.
 - 2-3 summary sheets if multiple groupings are requested (department, team, etc).
 - Dashboard KPIs must cover the user's requested dashboard metrics.
 
@@ -429,6 +463,12 @@ def extract_blueprint(objective, ctx, data, api_key, sym="\u20b9"):
                 for s in bp.get("sheets", []):
                     if isinstance(s, dict) and s.get("type") == "table":
                         s["row_count"] = min(int(s.get("row_count", 50) or 50), 500)
+                # v4.3: theme + smart chart selection
+                if layout_engine is not None:
+                    try:
+                        bp = layout_engine.style_blueprint(bp, sym)
+                    except Exception:
+                        pass
                 return bp, "ai", "ok"
             reason = "AI blueprint invalid; domain fallback used"
         else:
@@ -436,10 +476,22 @@ def extract_blueprint(objective, ctx, data, api_key, sym="\u20b9"):
     except Exception as e:
         traceback.print_exc()
         reason = f"blueprint exception: {str(e)[:100]}"
-    if _WF_KEYWORDS.search(objective):
-        return _fallback_blueprint_workforce(objective, sym), "fallback", reason
+    # v4.3: prefer domain_detector (broader domain coverage). Keep legacy
+    # keyword routing as safety net when detector unavailable.
+    if domain_detector is not None:
+        try:
+            domain = domain_detector.detect_domain(objective, ctx)
+            if domain == "financial":
+                return None, "fallback_v4_template", reason
+            if domain == "workforce":
+                return _fallback_blueprint_workforce(objective, sym), "fallback", reason
+            return _fallback_blueprint_generic(objective, sym), "fallback", reason
+        except Exception:
+            pass
     if _FIN_KEYWORDS.search(objective):
         return None, "fallback_v4_template", reason
+    if _WF_KEYWORDS.search(objective):
+        return _fallback_blueprint_workforce(objective, sym), "fallback", reason
     return _fallback_blueprint_generic(objective, sym), "fallback", reason
 
 
@@ -460,7 +512,7 @@ Schema:
 
 RULES:
 - 10-16 slides tailored EXACTLY to the request topic and audience. No generic filler.
-- At least 3 chart slides with realistic internally-consistent numbers for the domain (currency {sym}).
+- At least 3 chart slides. CRITICAL: if DATA contains actual figures, use EXACTLY those in charts/KPIs; invent nothing that contradicts them (currency {sym}).
 - At least 1 kpi and 1 table slide. Every slide has a specific, useful speaker note.
 - Executive storytelling arc: situation → analysis → insight → recommendation → next steps.
 
@@ -481,7 +533,7 @@ Schema:
 
 RULES:
 - 6-10 sections tailored EXACTLY to the request. Executive summary first, recommendations near the end.
-- Include at least 2 tables and 1 chart with realistic internally-consistent figures ({sym}).
+- Include at least 2 tables and 1 chart. CRITICAL: if DATA contains actual figures, use EXACTLY those; derive additional values only via arithmetic ({sym}).
 - Substantive analytical writing, no generic AI filler. table/chart keys optional per section.
 
 REQUEST: {obj}
@@ -550,6 +602,12 @@ def extract_doc_blueprint(fmt, objective, ctx, data, api_key, sym="\u20b9"):
         if raw is not None:
             bp = _try_parse(raw)
             if valid(bp):
+                # v4.3: theme + smart chart selection
+                if layout_engine is not None:
+                    try:
+                        bp = layout_engine.style_blueprint(bp, sym)
+                    except Exception:
+                        pass
                 return bp, "ai", "ok"
             reason = "AI doc blueprint invalid; model fallback used"
         else:
@@ -557,10 +615,22 @@ def extract_doc_blueprint(fmt, objective, ctx, data, api_key, sym="\u20b9"):
     except Exception as e:
         traceback.print_exc()
         reason = f"doc blueprint exception: {str(e)[:100]}"
-    # Fallback: derive blueprint from the (possibly AI-enriched) base model
-    model, m2, r2 = extract(objective, ctx, data, api_key, sym)
+    # v4.3: derive blueprint from domain-appropriate model when possible.
+    model = None
+    if domain_detector is not None:
+        try:
+            model = domain_detector.get_fallback_model(objective, sym)
+        except Exception:
+            model = None
+    if model is None:
+        model, _m2, _r2 = extract(objective, ctx, data, api_key, sym)
     title = model.get("title") or objective[:80] or "Business Document"
     subtitle = "Prepared by OrchestrIQ"
     bp = _model_to_pptx_bp(model, title, subtitle) if fmt == "pptx" else \
          _model_to_doc_bp(model, title, subtitle)
+    if layout_engine is not None:
+        try:
+            bp = layout_engine.style_blueprint(bp, sym)
+        except Exception:
+            pass
     return bp, "fallback", reason
