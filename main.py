@@ -35,9 +35,27 @@ class GenRequest(BaseModel):
     available_data: str = ""
     currency: str = "INR"
     currency_symbol: str = "\u20b9"
-    api_key: Optional[str] = ""
+    api_key: Optional[str] = ""          # legacy — treated as Claude key if no claude_key given
+    claude_key: Optional[str] = ""
+    openai_key: Optional[str] = ""
+    deepseek_key: Optional[str] = ""
+    provider_order: Optional[str] = ""   # e.g. "deepseek,claude,openai" — first working one wins
     title: Optional[str] = ""
     subtitle: Optional[str] = ""
+
+
+def _keys_and_order(req: "GenRequest"):
+    """Builds the provider key map + try-order from the request. Falls back
+    to sensible defaults so older frontend calls (api_key only) still work."""
+    keys = {
+        "claude": (req.claude_key or req.api_key or "").strip(),
+        "openai": (req.openai_key or "").strip(),
+        "deepseek": (req.deepseek_key or "").strip(),
+    }
+    order = [p.strip() for p in (req.provider_order or "").split(",") if p.strip()]
+    if not order:
+        order = ["deepseek", "claude", "openai"]
+    return keys, order
 
 
 @app.exception_handler(Exception)
@@ -69,7 +87,8 @@ def _pipeline(req: GenRequest, fmt: str) -> Response:
     This function itself never raises."""
     obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
     sym = (req.currency_symbol or "\u20b9")[:4]
-    model, mode, reason = ai_extractor.extract(obj, ctx, data, req.api_key or "", sym)
+    keys, order = _keys_and_order(req)
+    model, mode, reason = ai_extractor.extract(obj, ctx, data, keys, order, sym)
     title = (req.title or model.get("title") or obj)[:90]
     subtitle = (req.subtitle or "Board of Directors Review")[:90]
 
@@ -108,7 +127,8 @@ def gen_excel(req: GenRequest):
     try:
         obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
         sym = (req.currency_symbol or "\u20b9")[:4]
-        bp, mode, reason = ai_extractor.extract_blueprint(obj, ctx, data, req.api_key or "", sym)
+        keys, order = _keys_and_order(req)
+        bp, mode, reason = ai_extractor.extract_blueprint(obj, ctx, data, keys, order, sym)
         if bp is not None:
             try:
                 blob = render_blueprint(bp, sym)
@@ -131,8 +151,9 @@ def _doc_blueprint_pipeline(req: GenRequest, fmt: str) -> Response:
     try:
         obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
         sym = (req.currency_symbol or "\u20b9")[:4]
+        keys, order = _keys_and_order(req)
         bp, mode, reason = ai_extractor.extract_doc_blueprint(fmt, obj, ctx, data,
-                                                              req.api_key or "", sym)
+                                                              keys, order, sym)
         if req.title:
             bp["title"] = req.title[:90]
         if req.subtitle:
