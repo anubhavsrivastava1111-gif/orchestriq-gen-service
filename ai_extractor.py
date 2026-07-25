@@ -21,7 +21,10 @@ try:
 except Exception:
     layout_engine = None
 
-MODEL = "claude-haiku-4-5-20251001"
+CLAUDE_MODEL = "claude-haiku-4-5-20251001"
+OPENAI_MODEL = "gpt-4o-mini"
+DEEPSEEK_MODEL = "deepseek-v4-pro"
+DEFAULT_PROVIDER_ORDER = ["deepseek", "claude", "openai"]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -61,25 +64,77 @@ def _try_parse(raw: str):
     return None
 
 
-def _call_ai(prompt: str, api_key: str, max_tokens: int = 8000):
-    """Call Claude. Returns raw text or None. Never raises.
-    Falls back to the ANTHROPIC_API_KEY environment variable so the
-    intelligence layer works even when the frontend sends no key."""
-    import os
-    if not api_key or len(api_key) < 20:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-    if not api_key or len(api_key) < 20:
+def _call_claude(prompt: str, key: str, max_tokens: int):
+    if not key or len(key) < 20:
         return None
     try:
         import anthropic
-        client = anthropic.Anthropic(api_key=api_key, timeout=90.0)
+        client = anthropic.Anthropic(api_key=key, timeout=90.0)
         msg = client.messages.create(
-            model=MODEL, max_tokens=max_tokens,
+            model=CLAUDE_MODEL, max_tokens=max_tokens,
             messages=[{"role": "user", "content": prompt}])
         return "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     except Exception:
         traceback.print_exc()
         return None
+
+
+def _call_openai_compatible(prompt: str, key: str, base_url: str, model: str, max_tokens: int):
+    """Shared caller for OpenAI and DeepSeek — both speak the same REST
+    format. Uses only Python's built-in networking, no extra libraries."""
+    if not key or len(key) < 10:
+        return None
+    try:
+        import json as _json
+        from urllib import request as _urlreq
+        body = _json.dumps({
+            "model": model, "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }).encode()
+        req = _urlreq.Request(base_url, data=body, method="POST",
+                              headers={"Content-Type": "application/json",
+                                       "Authorization": "Bearer " + key.strip()})
+        with _urlreq.urlopen(req, timeout=90) as resp:
+            data = _json.loads(resp.read().decode())
+        return data.get("choices", [{}])[0].get("message", {}).get("content", "")
+    except Exception:
+        traceback.print_exc()
+        return None
+
+
+def _call_openai(prompt: str, key: str, max_tokens: int):
+    return _call_openai_compatible(prompt, key,
+        "https://api.openai.com/v1/chat/completions", OPENAI_MODEL, max_tokens)
+
+
+def _call_deepseek(prompt: str, key: str, max_tokens: int):
+    return _call_openai_compatible(prompt, key,
+        "https://api.deepseek.com/v1/chat/completions", DEEPSEEK_MODEL, max_tokens)
+
+
+def _call_ai(prompt: str, keys: dict, order=None, max_tokens: int = 8000):
+    """Tries each provider in `order`, using the matching key from `keys`.
+    keys example: {"claude":"...", "openai":"...", "deepseek":"..."}.
+    Falls back to server environment variables when a specific key is
+    missing, so the service still works if the frontend sends nothing.
+    Returns (raw_text, provider_used) — or (None, None) if every
+    provider is missing a key or fails. Never raises."""
+    import os
+    order = order or DEFAULT_PROVIDER_ORDER
+    keys = keys or {}
+    callers = {
+        "claude": lambda k: _call_claude(prompt, k or os.environ.get("ANTHROPIC_API_KEY", ""), max_tokens),
+        "openai": lambda k: _call_openai(prompt, k or os.environ.get("OPENAI_API_KEY", ""), max_tokens),
+        "deepseek": lambda k: _call_deepseek(prompt, k or os.environ.get("DEEPSEEK_API_KEY", ""), max_tokens),
+    }
+    for provider in order:
+        caller = callers.get(provider)
+        if not caller:
+            continue
+        text = caller(keys.get(provider, ""))
+        if text:
+            return text, provider
+    return None, None
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -203,14 +258,14 @@ AVAILABLE DATA:
 """
 
 
-def extract(objective, ctx, data, api_key, sym="₹"):
+def extract(objective, ctx, data, keys, order=None, sym="₹"):
     """Master extraction. Returns (enriched_model_dict, mode, reason).
-    mode: 'ai' or 'fallback'. NEVER raises."""
+    mode: 'ai:<provider>' or 'fallback'. NEVER raises."""
     try:
         base = _base_model(objective, sym)
-        raw = _call_ai(_PROMPT.format(sym=sym, obj=objective[:1500],
+        raw, used_provider = _call_ai(_PROMPT.format(sym=sym, obj=objective[:1500],
                                       ctx=ctx[:2000], data=data[:8000] or "(none)"),
-                       api_key)
+                       keys, order)
         if raw is None:
             if domain_detector is not None:
                 try:
@@ -260,7 +315,7 @@ def extract(objective, ctx, data, api_key, sym="₹"):
                     nps.append([str(g[0])[:70], [str(p)[:140] for p in g[1][:5]]])
             if len(nps) >= 3:
                 base["narrative_points"] = nps
-        return base, "ai", "ok"
+        return base, "ai:" + used_provider, "ok"
     except Exception as e:
         traceback.print_exc()
         if domain_detector is not None:
@@ -448,14 +503,14 @@ _WF_KEYWORDS = re.compile(r'\b(workforce|fte|employee|staffing|headcount|shrinka
 _FIN_KEYWORDS = re.compile(r'\b(board|quarterly|p&l|profit|cash flow|financial statement|budget|forecast|investor|revenue model)\b', re.I)
 
 
-def extract_blueprint(objective, ctx, data, api_key, sym="\u20b9"):
+def extract_blueprint(objective, ctx, data, keys, order=None, sym="\u20b9"):
     """Returns (blueprint, mode, reason). NEVER raises.
     AI designs the structure; deterministic fallbacks by domain keywords."""
     try:
         from blueprint_engine import validate_blueprint
-        raw = _call_ai(_BP_PROMPT.format(sym=sym, obj=objective[:5000],
+        raw, used_provider = _call_ai(_BP_PROMPT.format(sym=sym, obj=objective[:5000],
                                          ctx=ctx[:2000], data=(data[:6000] or "(none)")),
-                       api_key, max_tokens=14000)
+                       keys, order, max_tokens=14000)
         if raw is not None:
             bp = _try_parse(raw)
             if validate_blueprint(bp):
@@ -469,7 +524,7 @@ def extract_blueprint(objective, ctx, data, api_key, sym="\u20b9"):
                         bp = layout_engine.style_blueprint(bp, sym)
                     except Exception:
                         pass
-                return bp, "ai", "ok"
+                return bp, "ai:" + used_provider, "ok"
             reason = "AI blueprint invalid; domain fallback used"
         else:
             reason = "no api key or AI call failed; domain fallback used"
@@ -585,7 +640,7 @@ def _model_to_doc_bp(model, title, subtitle):
     return {"title": title, "subtitle": subtitle, "sections": out}
 
 
-def extract_doc_blueprint(fmt, objective, ctx, data, api_key, sym="\u20b9"):
+def extract_doc_blueprint(fmt, objective, ctx, data, keys, order=None, sym="\u20b9"):
     """fmt in {'pptx','pdf','docx'}. Returns (blueprint, mode, reason). Never raises."""
     try:
         from doc_blueprint_engine import validate_pptx_blueprint, validate_doc_blueprint
@@ -598,7 +653,7 @@ def extract_doc_blueprint(fmt, objective, ctx, data, api_key, sym="\u20b9"):
                                         sym=sym, obj=objective[:5000], ctx=ctx[:2000],
                                         data=(data[:6000] or "(none)"))
             valid = validate_doc_blueprint
-        raw = _call_ai(prompt, api_key, max_tokens=12000)
+        raw, used_provider = _call_ai(prompt, keys, order, max_tokens=12000)
         if raw is not None:
             bp = _try_parse(raw)
             if valid(bp):
@@ -608,10 +663,10 @@ def extract_doc_blueprint(fmt, objective, ctx, data, api_key, sym="\u20b9"):
                         bp = layout_engine.style_blueprint(bp, sym)
                     except Exception:
                         pass
-                return bp, "ai", "ok"
+                return bp, "ai:" + used_provider, "ok"
             reason = "AI doc blueprint invalid; model fallback used"
         else:
-            reason = "no api key or AI call failed; model fallback used"
+            reason = "no working API key for any configured provider; model fallback used"
     except Exception as e:
         traceback.print_exc()
         reason = f"doc blueprint exception: {str(e)[:100]}"
@@ -623,7 +678,7 @@ def extract_doc_blueprint(fmt, objective, ctx, data, api_key, sym="\u20b9"):
         except Exception:
             model = None
     if model is None:
-        model, _m2, _r2 = extract(objective, ctx, data, api_key, sym)
+        model, _m2, _r2 = extract(objective, ctx, data, keys, order, sym)
     title = model.get("title") or objective[:80] or "Business Document"
     subtitle = "Prepared by OrchestrIQ"
     bp = _model_to_pptx_bp(model, title, subtitle) if fmt == "pptx" else \
