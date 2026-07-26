@@ -13,7 +13,31 @@ from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph,
 from reportlab.graphics.shapes import Drawing, String
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+import glob as _glob
 
+def _register_fonts():
+    """Embed a Unicode font so ₹, dashes, and other glyphs render instead
+    of showing as boxes. DejaVu ships with the Railway (Debian) image.
+    Falls back silently to Helvetica if not found (boxes, but no crash)."""
+    reg = {"base": "Helvetica", "bold": "Helvetica-Bold"}
+    try:
+        cands = _glob.glob("/usr/share/fonts/**/DejaVuSans.ttf", recursive=True)
+        bcands = _glob.glob("/usr/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True)
+        if cands:
+            pdfmetrics.registerFont(TTFont("OIQ", cands[0]))
+            reg["base"] = "OIQ"
+        if bcands:
+            pdfmetrics.registerFont(TTFont("OIQ-Bold", bcands[0]))
+            reg["bold"] = "OIQ-Bold"
+    except Exception:
+        pass
+    return reg
+
+_FONTS = _register_fonts()
+FONT = _FONTS["base"]
+FONT_BOLD = _FONTS["bold"]
 NAVY = colors.HexColor("#1E3A5F")
 TEAL = colors.HexColor("#14B8A6")
 GREY = colors.HexColor("#64748B")
@@ -21,15 +45,15 @@ LIGHT = colors.HexColor("#F1F5F9")
 
 W, H = A4
 
-S_TITLE = ParagraphStyle("t", fontName="Helvetica-Bold", fontSize=26, textColor=colors.white, leading=32)
-S_SUB = ParagraphStyle("s", fontName="Helvetica", fontSize=13, textColor=TEAL, leading=18)
-S_H1 = ParagraphStyle("h1", fontName="Helvetica-Bold", fontSize=16, textColor=NAVY,
+S_TITLE = ParagraphStyle("t", fontName=FONT_BOLD, fontSize=26, textColor=colors.white, leading=32)
+S_SUB = ParagraphStyle("s", fontName=FONT, fontSize=13, textColor=TEAL, leading=18)
+S_H1 = ParagraphStyle("h1", fontName=FONT_BOLD, fontSize=16, textColor=NAVY,
                       spaceBefore=18, spaceAfter=8)
-S_BODY = ParagraphStyle("b", fontName="Helvetica", fontSize=10.5, textColor=colors.HexColor("#334155"),
+S_BODY = ParagraphStyle("b", fontName=FONT, fontSize=10.5, textColor=colors.HexColor("#334155"),
                         leading=15.5, spaceAfter=8, alignment=4)
-S_TOC = ParagraphStyle("toc", fontName="Helvetica", fontSize=11.5, textColor=NAVY,
+S_TOC = ParagraphStyle("toc", fontName=FONT, fontSize=11.5, textColor=NAVY,
                        leading=22, leftIndent=6)
-S_SMALL = ParagraphStyle("sm", fontName="Helvetica", fontSize=8.5, textColor=GREY)
+S_SMALL = ParagraphStyle("sm", fontName=FONT, fontSize=8.5, textColor=GREY)
 
 
 def _cover(canvas, doc, title, subtitle):
@@ -37,13 +61,13 @@ def _cover(canvas, doc, title, subtitle):
     canvas.setFillColor(NAVY); canvas.rect(0, 0, W, H, fill=1, stroke=0)
     canvas.setFillColor(TEAL); canvas.rect(0, H - 4.2 * cm, W, 0.25 * cm, fill=1, stroke=0)
     canvas.setFillColor(colors.white)
-    canvas.setFont("Helvetica-Bold", 30)
+    canvas.setFont(FONT_BOLD, 30)
     y = H - 9 * cm
     for line in _wrap(title, 30):
         canvas.drawString(2.2 * cm, y, line); y -= 1.15 * cm
-    canvas.setFillColor(TEAL); canvas.setFont("Helvetica", 15)
+    canvas.setFillColor(TEAL); canvas.setFont(FONT, 15)
     canvas.drawString(2.2 * cm, y - 0.6 * cm, subtitle)
-    canvas.setFillColor(colors.HexColor("#94A3B8")); canvas.setFont("Helvetica", 10)
+    canvas.setFillColor(colors.HexColor("#94A3B8")); canvas.setFont(FONT, 10)
     canvas.drawString(2.2 * cm, 2.6 * cm, "Confidential — Prepared for the Board of Directors")
     canvas.setFillColor(TEAL); canvas.rect(0, 1.8 * cm, W, 0.12 * cm, fill=1, stroke=0)
     canvas.restoreState()
@@ -61,7 +85,7 @@ def _wrap(text, n):
 def _hf(canvas, doc, title):
     canvas.saveState()
     canvas.setFillColor(TEAL); canvas.rect(0, H - 0.9 * cm, W, 0.12 * cm, fill=1, stroke=0)
-    canvas.setFillColor(GREY); canvas.setFont("Helvetica", 8.5)
+    canvas.setFillColor(GREY); canvas.setFont(FONT, 8.5)
     canvas.drawString(2 * cm, H - 1.5 * cm, title[:80])
     canvas.drawRightString(W - 2 * cm, 1.2 * cm, f"Page {doc.page - 1}")
     canvas.drawString(2 * cm, 1.2 * cm, "Confidential")
@@ -74,9 +98,9 @@ def _kpi_table(kpis):
     t.setStyle(_tstyle())
     return t
 
-S_CELL = ParagraphStyle("cell", fontName="Helvetica", fontSize=9.5,
+S_CELL = ParagraphStyle("cell", fontName=FONT, fontSize=9.5,
                         textColor=colors.HexColor("#334155"), leading=12)
-S_CELL_HEAD = ParagraphStyle("cellhead", fontName="Helvetica-Bold", fontSize=9.5,
+S_CELL_HEAD = ParagraphStyle("cellhead", fontName=FONT_BOLD, fontSize=9.5,
                             textColor=colors.white, leading=12)
 
 def _cellwrap(data):
@@ -113,7 +137,7 @@ def _bar_drawing(months, series, title):
     ch.valueAxis.labels.fontSize = 7
     ch.categoryAxis.labels.fontSize = 8
     d.add(ch)
-    d.add(String(45, 190, title, fontName="Helvetica-Bold", fontSize=11, fillColor=NAVY))
+    d.add(String(45, 190, title, fontName=FONT_BOLD, fontSize=11, fillColor=NAVY))
     return d
 
 
