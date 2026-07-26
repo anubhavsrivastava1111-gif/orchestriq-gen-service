@@ -1,80 +1,79 @@
 """
-OrchestrIQ Document Intelligence Engine v4 — PDF Engine
-Cover page, table of contents, executive sections, KPI table, charts,
-risk table, recommendations, appendix, header/footer with page numbers.
+OrchestrIQ Document Intelligence Engine v6 — PDF Engine (Consulting-grade)
+Backward-compatible: preserves _cover, _hf, _tstyle, _bar_drawing, S_H1, S_BODY,
+S_TOC, S_SMALL, W, H (imported by doc_blueprint_engine.py) with original
+signatures. Upgrades: embedded DejaVu Unicode font (₹ renders, no boxes),
+wrapped table cells (no overlap/clipping), metric-card KPI band, callout boxes,
+section dividers, styled charts, cleaner cover. Same build_pdf signature.
 """
-import io
+import io, glob
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.lib import colors
 from reportlab.lib.styles import ParagraphStyle
+from reportlab.lib.enums import TA_LEFT, TA_JUSTIFY, TA_CENTER
 from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph,
-                                Spacer, Table, TableStyle, PageBreak)
-from reportlab.graphics.shapes import Drawing, String
+                                Spacer, Table, TableStyle, PageBreak, KeepTogether)
+from reportlab.graphics.shapes import Drawing, String, Rect
 from reportlab.graphics.charts.barcharts import VerticalBarChart
 from reportlab.graphics.charts.linecharts import HorizontalLineChart
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
-import glob as _glob
 
+NAVY  = colors.HexColor("#1E3A5F")
+NAVY2 = colors.HexColor("#27446B")
+TEAL  = colors.HexColor("#14B8A6")
+GREY  = colors.HexColor("#64748B")
+LGREY = colors.HexColor("#94A3B8")
+LIGHT = colors.HexColor("#F1F5F9")
+CARD  = colors.HexColor("#F8FAFC")
+BORDER= colors.HexColor("#E2E8F0")
+INK   = colors.HexColor("#334155")
+GOLD  = colors.HexColor("#D97706")
+GREEN = colors.HexColor("#16A34A")
+
+W, H = A4
+
+# ── Embed a Unicode font so ₹, dashes, arrows render instead of boxes. ──
 def _register_fonts():
-    """Embed a Unicode font so ₹, dashes, and other glyphs render instead
-    of showing as boxes. DejaVu ships with the Railway (Debian) image.
-    Falls back silently to Helvetica if not found (boxes, but no crash)."""
     reg = {"base": "Helvetica", "bold": "Helvetica-Bold"}
     try:
-        cands = _glob.glob("/usr/share/fonts/**/DejaVuSans.ttf", recursive=True)
-        bcands = _glob.glob("/usr/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True)
-        if cands:
-            pdfmetrics.registerFont(TTFont("OIQ", cands[0]))
-            reg["base"] = "OIQ"
-        if bcands:
-            pdfmetrics.registerFont(TTFont("OIQ-Bold", bcands[0]))
-            reg["bold"] = "OIQ-Bold"
+        c = glob.glob("/usr/share/fonts/**/DejaVuSans.ttf", recursive=True)
+        b = glob.glob("/usr/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True)
+        if c:
+            pdfmetrics.registerFont(TTFont("OIQ", c[0])); reg["base"] = "OIQ"
+        if b:
+            pdfmetrics.registerFont(TTFont("OIQ-Bold", b[0])); reg["bold"] = "OIQ-Bold"
     except Exception:
         pass
     return reg
 
-_FONTS = _register_fonts()
-FONT = _FONTS["base"]
-FONT_BOLD = _FONTS["bold"]
-NAVY = colors.HexColor("#1E3A5F")
-TEAL = colors.HexColor("#14B8A6")
-GREY = colors.HexColor("#64748B")
-LIGHT = colors.HexColor("#F1F5F9")
+_F = _register_fonts()
+FONT = _F["base"]; FONT_BOLD = _F["bold"]
 
-W, H = A4
-
+# ── Paragraph styles (names S_H1/S_BODY/S_TOC/S_SMALL preserved for import) ──
 S_TITLE = ParagraphStyle("t", fontName=FONT_BOLD, fontSize=26, textColor=colors.white, leading=32)
-S_SUB = ParagraphStyle("s", fontName=FONT, fontSize=13, textColor=TEAL, leading=18)
-S_H1 = ParagraphStyle("h1", fontName=FONT_BOLD, fontSize=16, textColor=NAVY,
-                      spaceBefore=18, spaceAfter=8)
-S_BODY = ParagraphStyle("b", fontName=FONT, fontSize=10.5, textColor=colors.HexColor("#334155"),
-                        leading=15.5, spaceAfter=8, alignment=4)
-S_TOC = ParagraphStyle("toc", fontName=FONT, fontSize=11.5, textColor=NAVY,
-                       leading=22, leftIndent=6)
+S_SUB   = ParagraphStyle("s", fontName=FONT, fontSize=13, textColor=TEAL, leading=18)
+S_KICK  = ParagraphStyle("k", fontName=FONT_BOLD, fontSize=10, textColor=TEAL, leading=12,
+                         spaceBefore=14, spaceAfter=2)
+S_H1    = ParagraphStyle("h1", fontName=FONT_BOLD, fontSize=18, textColor=NAVY,
+                         spaceBefore=6, spaceAfter=8, leading=22)
+S_H2    = ParagraphStyle("h2", fontName=FONT_BOLD, fontSize=13, textColor=NAVY2,
+                         spaceBefore=10, spaceAfter=4, leading=16)
+S_BODY  = ParagraphStyle("b", fontName=FONT, fontSize=10.5, textColor=INK,
+                         leading=15.5, spaceAfter=8, alignment=TA_JUSTIFY)
+S_TOC   = ParagraphStyle("toc", fontName=FONT, fontSize=11.5, textColor=NAVY,
+                         leading=22, leftIndent=6)
 S_SMALL = ParagraphStyle("sm", fontName=FONT, fontSize=8.5, textColor=GREY)
-
-
-def _cover(canvas, doc, title, subtitle):
-    canvas.saveState()
-    canvas.setFillColor(NAVY); canvas.rect(0, 0, W, H, fill=1, stroke=0)
-    canvas.setFillColor(TEAL); canvas.rect(0, H - 4.2 * cm, W, 0.25 * cm, fill=1, stroke=0)
-    canvas.setFillColor(colors.white)
-    canvas.setFont(FONT_BOLD, 30)
-    y = H - 9 * cm
-    for line in _wrap(title, 30):
-        canvas.drawString(2.2 * cm, y, line); y -= 1.15 * cm
-    canvas.setFillColor(TEAL); canvas.setFont(FONT, 15)
-    canvas.drawString(2.2 * cm, y - 0.6 * cm, subtitle)
-    canvas.setFillColor(colors.HexColor("#94A3B8")); canvas.setFont(FONT, 10)
-    canvas.drawString(2.2 * cm, 2.6 * cm, "Confidential — Prepared for the Board of Directors")
-    canvas.setFillColor(TEAL); canvas.rect(0, 1.8 * cm, W, 0.12 * cm, fill=1, stroke=0)
-    canvas.restoreState()
+S_CELL  = ParagraphStyle("cell", fontName=FONT, fontSize=9.5, textColor=INK, leading=12)
+S_CELLH = ParagraphStyle("cellh", fontName=FONT_BOLD, fontSize=9.5, textColor=colors.white, leading=12)
+S_CARDL = ParagraphStyle("cardl", fontName=FONT_BOLD, fontSize=8, textColor=GREY, leading=10)
+S_CARDV = ParagraphStyle("cardv", fontName=FONT_BOLD, fontSize=20, textColor=NAVY, leading=22)
+S_CALL  = ParagraphStyle("call", fontName=FONT, fontSize=11, textColor=INK, leading=16)
 
 
 def _wrap(text, n):
-    words, lines, cur = text.split(), [], ""
+    words, lines, cur = str(text).split(), [], ""
     for w in words:
         if len(cur) + len(w) + 1 <= n: cur = (cur + " " + w).strip()
         else: lines.append(cur); cur = w
@@ -82,63 +81,152 @@ def _wrap(text, n):
     return lines[:3]
 
 
+# ── _cover: preserved signature (canvas, doc, title, subtitle) ──
+def _cover(canvas, doc, title, subtitle):
+    canvas.saveState()
+    canvas.setFillColor(NAVY); canvas.rect(0, 0, W, H, fill=1, stroke=0)
+    # accent geometry
+    canvas.setFillColor(TEAL); canvas.rect(0, H - 4.2 * cm, W, 0.25 * cm, fill=1, stroke=0)
+    canvas.setFillColor(TEAL); canvas.rect(2.2 * cm, H - 8.0 * cm, 2.4 * cm, 0.14 * cm, fill=1, stroke=0)
+    canvas.setFillColor(colors.white); canvas.setFont(FONT_BOLD, 30)
+    y = H - 9 * cm
+    for line in _wrap(title, 30):
+        canvas.drawString(2.2 * cm, y, line); y -= 1.15 * cm
+    canvas.setFillColor(TEAL); canvas.setFont(FONT, 15)
+    canvas.drawString(2.2 * cm, y - 0.6 * cm, subtitle)
+    canvas.setFillColor(LGREY); canvas.setFont(FONT, 10)
+    canvas.drawString(2.2 * cm, 2.6 * cm, "Confidential \u2014 Prepared for the Board of Directors")
+    canvas.setFillColor(TEAL); canvas.rect(0, 1.8 * cm, W, 0.12 * cm, fill=1, stroke=0)
+    canvas.restoreState()
+
+
+# ── _hf: preserved signature (canvas, doc, title) ──
 def _hf(canvas, doc, title):
     canvas.saveState()
     canvas.setFillColor(TEAL); canvas.rect(0, H - 0.9 * cm, W, 0.12 * cm, fill=1, stroke=0)
     canvas.setFillColor(GREY); canvas.setFont(FONT, 8.5)
-    canvas.drawString(2 * cm, H - 1.5 * cm, title[:80])
+    canvas.drawString(2 * cm, H - 1.5 * cm, str(title)[:80])
     canvas.drawRightString(W - 2 * cm, 1.2 * cm, f"Page {doc.page - 1}")
     canvas.drawString(2 * cm, 1.2 * cm, "Confidential")
+    canvas.setStrokeColor(BORDER); canvas.setLineWidth(0.5)
+    canvas.line(2 * cm, 1.55 * cm, W - 2 * cm, 1.55 * cm)
     canvas.restoreState()
 
 
-def _kpi_table(kpis):
-    data = [["KPI", "Value", "Δ vs Prior"]] + [list(k[:3]) for k in kpis[:8]]
-    t = Table(_cellwrap(data), colWidths=[7 * cm, 4.5 * cm, 4.5 * cm])
-    t.setStyle(_tstyle())
-    return t
-
-S_CELL = ParagraphStyle("cell", fontName=FONT, fontSize=9.5,
-                        textColor=colors.HexColor("#334155"), leading=12)
-S_CELL_HEAD = ParagraphStyle("cellhead", fontName=FONT_BOLD, fontSize=9.5,
-                            textColor=colors.white, leading=12)
-
-def _cellwrap(data):
-    """Wrap every cell in a Paragraph so text wraps instead of clipping,
-    and rows auto-grow to fit. Row 0 is treated as the header row."""
-    out = []
-    for ri, row in enumerate(data):
-        style = S_CELL_HEAD if ri == 0 else S_CELL
-        out.append([Paragraph(str(c) if c is not None else "", style) for c in row])
-    return out
+# ── _tstyle: preserved. Header handled by wrapped Paragraphs; keeps grid/stripe.
 def _tstyle():
     return TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), NAVY),
-        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
-        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
-        ("FONTSIZE", (0, 0), (-1, -1), 9.5),
         ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, LIGHT]),
         ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CBD5E1")),
         ("TOPPADDING", (0, 0), (-1, -1), 6),
         ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
     ])
 
 
+def _cellwrap(data):
+    """Wrap each cell in a Paragraph so text wraps and rows auto-grow."""
+    out = []
+    for ri, row in enumerate(data):
+        st = S_CELLH if ri == 0 else S_CELL
+        out.append([Paragraph(str(c) if c is not None else "", st) for c in row])
+    return out
+
+
+def _wrapped_table(data, col_widths):
+    t = Table(_cellwrap(data), colWidths=col_widths, repeatRows=1)
+    t.setStyle(_tstyle())
+    return t
+
+
+# ── _bar_drawing: preserved signature. Cleaner colors, bigger title, framed.
 def _bar_drawing(months, series, title):
-    d = Drawing(440, 210)
+    d = Drawing(460, 220)
+    d.add(Rect(0, 0, 460, 220, fillColor=CARD, strokeColor=BORDER, strokeWidth=0.5))
     ch = VerticalBarChart()
-    ch.x, ch.y, ch.width, ch.height = 45, 30, 360, 140
+    ch.x, ch.y, ch.width, ch.height = 50, 35, 370, 140
     ch.data = [list(s[1]) for s in series]
-    ch.categoryAxis.categoryNames = list(months)
-    ch.bars[0].fillColor = NAVY
-    if len(series) > 1: ch.bars[1].fillColor = TEAL
-    ch.valueAxis.labels.fontSize = 7
-    ch.categoryAxis.labels.fontSize = 8
+    ch.categoryAxis.categoryNames = [str(m) for m in months]
+    palette = [NAVY, TEAL, GOLD, GREY]
+    for i in range(len(series)):
+        try: ch.bars[i].fillColor = palette[i % len(palette)]
+        except Exception: pass
+    ch.valueAxis.labels.fontName = FONT; ch.valueAxis.labels.fontSize = 7
+    ch.categoryAxis.labels.fontName = FONT; ch.categoryAxis.labels.fontSize = 7.5
+    ch.categoryAxis.labels.angle = 0
+    ch.barSpacing = 1; ch.groupSpacing = 10
     d.add(ch)
-    d.add(String(45, 190, title, fontName=FONT_BOLD, fontSize=11, fillColor=NAVY))
+    d.add(String(50, 198, str(title), fontName=FONT_BOLD, fontSize=12, fillColor=NAVY))
     return d
+
+
+def _line_drawing(months, series, title):
+    d = Drawing(460, 220)
+    d.add(Rect(0, 0, 460, 220, fillColor=CARD, strokeColor=BORDER, strokeWidth=0.5))
+    ch = HorizontalLineChart()
+    ch.x, ch.y, ch.width, ch.height = 50, 35, 370, 140
+    ch.data = [list(s[1]) for s in series]
+    ch.categoryAxis.categoryNames = [str(m) for m in months]
+    palette = [NAVY, TEAL, GOLD]
+    for i in range(len(series)):
+        try:
+            ch.lines[i].strokeColor = palette[i % len(palette)]
+            ch.lines[i].strokeWidth = 2
+        except Exception: pass
+    ch.valueAxis.labels.fontName = FONT; ch.valueAxis.labels.fontSize = 7
+    ch.categoryAxis.labels.fontName = FONT; ch.categoryAxis.labels.fontSize = 7.5
+    d.add(ch)
+    d.add(String(50, 198, str(title), fontName=FONT_BOLD, fontSize=12, fillColor=NAVY))
+    return d
+
+
+def _kicker(text):
+    return Paragraph(str(text).upper(), S_KICK)
+
+
+def _metric_band(kpis):
+    """A row of up to 4 KPI 'cards' rendered as a borderless table of stacked
+    label/value paragraphs — the PDF equivalent of the PPT metric cards."""
+    cards = kpis[:4]
+    if not cards: return Spacer(1, 1)
+    cells = []
+    for k in cards:
+        label = str(k[0]) if len(k) > 0 else ""
+        value = str(k[1]) if len(k) > 1 else ""
+        inner = Table([[Paragraph(label.upper(), S_CARDL)],
+                       [Paragraph(value, S_CARDV)]],
+                      colWidths=[(W - 4 * cm) / len(cards) - 0.3 * cm])
+        inner.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (-1, -1), CARD),
+            ("LINEBEFORE", (0, 0), (0, -1), 3, TEAL),
+            ("TOPPADDING", (0, 0), (-1, -1), 8),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 8),
+            ("LEFTPADDING", (0, 0), (-1, -1), 10),
+            ("BOX", (0, 0), (-1, -1), 0.5, BORDER),
+        ]))
+        cells.append(inner)
+    band = Table([cells], colWidths=[(W - 4 * cm) / len(cards)] * len(cards))
+    band.setStyle(TableStyle([("LEFTPADDING",(0,0),(-1,-1),0),("RIGHTPADDING",(0,0),(-1,-1),4),
+                              ("TOPPADDING",(0,0),(-1,-1),0),("BOTTOMPADDING",(0,0),(-1,-1),0),
+                              ("VALIGN",(0,0),(-1,-1),"TOP")]))
+    return band
+
+
+def _callout(text, accent=NAVY):
+    """A shaded callout box for a key statement."""
+    t = Table([[Paragraph(str(text), S_CALL)]], colWidths=[W - 4 * cm])
+    t.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, -1), LIGHT),
+        ("LINEBEFORE", (0, 0), (0, -1), 4, accent),
+        ("TOPPADDING", (0, 0), (-1, -1), 10),
+        ("BOTTOMPADDING", (0, 0), (-1, -1), 10),
+        ("LEFTPADDING", (0, 0), (-1, -1), 14),
+        ("RIGHTPADDING", (0, 0), (-1, -1), 12),
+    ]))
+    return t
 
 
 def build_pdf(model: dict, title: str, subtitle: str = "Board Report",
@@ -149,78 +237,86 @@ def build_pdf(model: dict, title: str, subtitle: str = "Board Report",
                           topMargin=2.4 * cm, bottomMargin=2 * cm)
     frame = Frame(2 * cm, 2 * cm, W - 4 * cm, H - 4.6 * cm, id="f")
     doc.addPageTemplates([
-        PageTemplate(id="cover", frames=[frame],
-                     onPage=lambda c, d: _cover(c, d, title, subtitle)),
-        PageTemplate(id="body", frames=[frame],
-                     onPage=lambda c, d: _hf(c, d, title)),
+        PageTemplate(id="cover", frames=[frame], onPage=lambda c, d: _cover(c, d, title, subtitle)),
+        PageTemplate(id="body", frames=[frame], onPage=lambda c, d: _hf(c, d, title)),
     ])
 
     months = model["months"]; rev = model["rev"]; gross = model["gross"]
     ebitda = model["ebitda"]; kpis = model["kpis"]; risks = model["risks"]
-    recs = model["recs"]
-    sections = model.get("sections") or []
+    recs = model["recs"]; sections = model.get("sections") or []
 
-    el = []
-    # cover page content is drawn on canvas; push to next template
     from reportlab.platypus import NextPageTemplate
-    el.append(NextPageTemplate("body"))
+    el = [NextPageTemplate("body"), PageBreak()]
+
+    # EXECUTIVE SNAPSHOT — metric band up front
+    el.append(_kicker("Scorecard"))
+    el.append(Paragraph("Executive Snapshot", S_H1))
+    el.append(_metric_band(kpis))
+    el.append(Spacer(1, 14))
+    # remaining KPIs as wrapped table
+    rows = [["KPI", "Value", "\u0394 vs Prior"]] + [list(k[:3]) for k in kpis[4:10]]
+    if len(rows) > 1:
+        el.append(_wrapped_table(rows, [8 * cm, 4 * cm, 4 * cm]))
     el.append(PageBreak())
 
-    # TOC
-    el.append(Paragraph("Table of Contents", S_H1))
-    toc_items = ["1. Executive KPI Scorecard", "2. Financial Charts"] + \
-                [f"{i + 3}. {s['h']}" for i, s in enumerate(sections)] + \
-                [f"{len(sections) + 3}. Risk Register",
-                 f"{len(sections) + 4}. Recommendations",
-                 f"{len(sections) + 5}. Appendix — Assumptions"]
-    for t in toc_items:
-        el.append(Paragraph(t, S_TOC))
-    el.append(PageBreak())
-
-    # KPI table
-    el.append(Paragraph("Executive KPI Scorecard", S_H1))
-    el.append(_kpi_table(kpis))
-    el.append(Spacer(1, 16))
-
-    # Charts
-    el.append(Paragraph("Financial Charts", S_H1))
+    # FINANCIAL CHARTS
+    el.append(_kicker("Financial Performance"))
+    el.append(Paragraph("Revenue, Margin & Cost Analysis", S_H1))
     el.append(_bar_drawing(months, [("Revenue", rev), ("Gross Profit", gross)],
-                           "Revenue & Gross Profit by Month"))
-    el.append(Spacer(1, 10))
-    el.append(_bar_drawing(months, [("EBITDA", ebitda)], "EBITDA by Month"))
+                           "Revenue & Gross Profit by Period"))
+    el.append(Spacer(1, 12))
+    gm = [round(g / r * 100, 1) if r else 0 for g, r in zip(gross, rev)]
+    em = [round(e / r * 100, 1) if r else 0 for e, r in zip(ebitda, rev)]
+    el.append(_line_drawing(months, [("Gross Margin %", gm), ("EBITDA Margin %", em)],
+                            "Margin Trend (%)"))
+    el.append(PageBreak())
+    el.append(_kicker("Financial Performance"))
+    el.append(Paragraph("EBITDA Trajectory", S_H1))
+    el.append(_bar_drawing(months, [("EBITDA", ebitda)], "EBITDA by Period"))
     el.append(PageBreak())
 
-    # Narrative sections
-    for s in sections:
-        el.append(Paragraph(s["h"], S_H1))
-        el.append(Paragraph(s["body"], S_BODY))
+    # NARRATIVE SECTIONS with kicker + divider + optional callout
+    for idx, s in enumerate(sections):
+        block = [_kicker("Analysis"), Paragraph(str(s.get("h", "Section")), S_H1)]
+        body = str(s.get("body", ""))
+        # first sentence becomes a callout for emphasis
+        if len(body) > 120:
+            cut = body.find(". ")
+            if 20 < cut < 240:
+                block.append(_callout(body[:cut + 1], TEAL))
+                block.append(Spacer(1, 8))
+                body = body[cut + 2:]
+        block.append(Paragraph(body, S_BODY))
+        el.append(KeepTogether(block))
+        el.append(Spacer(1, 6))
     el.append(PageBreak())
 
-    # Risk table
+    # RISK REGISTER
+    el.append(_kicker("Governance"))
     el.append(Paragraph("Risk Register", S_H1))
     rdata = [["Risk", "Severity", "Mitigation"]] + [list(r[:3]) for r in risks[:6]]
-    rt = Table(_cellwrap(rdata), colWidths=[6.5 * cm, 2.5 * cm, 7 * cm])
-    rt.setStyle(_tstyle())
-    el.append(rt)
-    el.append(Spacer(1, 16))
-
-    # Recommendations
-    el.append(Paragraph("Recommendations", S_H1))
-    for i, r in enumerate(recs[:6], 1):
-        el.append(Paragraph(f"{i}. {r}", S_BODY))
+    el.append(_wrapped_table(rdata, [6.0 * cm, 2.4 * cm, 7.6 * cm]))
     el.append(PageBreak())
 
-    # Appendix
-    el.append(Paragraph("Appendix — Key Assumptions", S_H1))
+    # RECOMMENDATIONS
+    el.append(_kicker("Decisions Requested"))
+    el.append(Paragraph("Recommendations & Board Asks", S_H1))
+    for i, r in enumerate(recs[:6], 1):
+        el.append(_callout(f"{i}.  {r}", NAVY))
+        el.append(Spacer(1, 6))
+    el.append(PageBreak())
+
+    # APPENDIX
+    el.append(_kicker("Reference"))
+    el.append(Paragraph("Appendix \u2014 Key Assumptions", S_H1))
     adata = [["Assumption", "Value"],
              ["Reporting currency", currency_symbol],
              ["COGS % of revenue", "22% (trailing average)"],
-             ["Base-case Q3 growth", "12% (pipeline-weighted)"],
+             ["Base-case growth", "12% (pipeline-weighted)"],
              ["Runway basis", "Trailing 3-month net burn"]]
-    at = Table(_cellwrap(adata), colWidths=[8 * cm, 8 * cm]); at.setStyle(_tstyle())
-    el.append(at)
+    el.append(_wrapped_table(adata, [8 * cm, 8 * cm]))
     el.append(Spacer(1, 12))
-    el.append(Paragraph("This report was generated by the OrchestrIQ Document Intelligence Engine. "
+    el.append(Paragraph("Generated by the OrchestrIQ Document Intelligence Engine. "
                         "Figures reconcile to the accompanying Excel workbook.", S_SMALL))
 
     doc.build(el)
