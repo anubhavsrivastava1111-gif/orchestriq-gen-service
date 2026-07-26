@@ -6,13 +6,12 @@ Keeps the >=15 slide / >=4 chart validation floor. Same build_pptx signature.
 """
 import io, glob
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
-from pptx.oxml.ns import qn
 
 NAVY  = RGBColor(0x1E, 0x3A, 0x5F)
 NAVY2 = RGBColor(0x2B, 0x4A, 0x73)
@@ -93,6 +92,17 @@ def _kicker_title(slide, title, kicker=""):
     _txt(slide, Inches(0.6), Inches(0.62), Inches(12.1), Inches(0.9),
          title, 29, True, NAVY)
     _rect(slide, Inches(0.62), Inches(1.5), Inches(0.9), Inches(0.05), TEAL)
+
+
+# ── BACKWARD-COMPATIBILITY SHIMS ──────────────────────────────────────────
+# doc_blueprint_engine.py imports these older names. They map to the new
+# equivalents so the existing blueprint pipeline keeps working unchanged.
+def _bar(slide, x, y, w, h, color, line=None):
+    return _rect(slide, x, y, w, h, color, line)
+
+def _header(slide, title, kicker=""):
+    return _kicker_title(slide, title, kicker)
+
 
 # ---------- LAYOUT PRIMITIVES ----------
 
