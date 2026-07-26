@@ -38,8 +38,14 @@ W, H = A4
 def _register_fonts():
     reg = {"base": "Helvetica", "bold": "Helvetica-Bold"}
     try:
-        c = glob.glob("/usr/share/fonts/**/DejaVuSans.ttf", recursive=True)
-        b = glob.glob("/usr/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True)
+        import os
+        _here = os.path.dirname(os.path.abspath(__file__))
+        c = ([os.path.join(_here, "fonts", "DejaVuSans.ttf")]
+             if os.path.exists(os.path.join(_here, "fonts", "DejaVuSans.ttf"))
+             else glob.glob("/usr/share/fonts/**/DejaVuSans.ttf", recursive=True))
+        b = ([os.path.join(_here, "fonts", "DejaVuSans-Bold.ttf")]
+             if os.path.exists(os.path.join(_here, "fonts", "DejaVuSans-Bold.ttf"))
+             else glob.glob("/usr/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True))
         if c:
             pdfmetrics.registerFont(TTFont("OIQ", c[0])); reg["base"] = "OIQ"
         if b:
