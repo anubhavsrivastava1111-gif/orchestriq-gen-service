@@ -40,12 +40,13 @@ def _register_fonts():
     try:
         import os
         _here = os.path.dirname(os.path.abspath(__file__))
-        c = ([os.path.join(_here, "fonts", "DejaVuSans.ttf")]
-             if os.path.exists(os.path.join(_here, "fonts", "DejaVuSans.ttf"))
-             else glob.glob("/usr/share/fonts/**/DejaVuSans.ttf", recursive=True))
-        b = ([os.path.join(_here, "fonts", "DejaVuSans-Bold.ttf")]
-             if os.path.exists(os.path.join(_here, "fonts", "DejaVuSans-Bold.ttf"))
-             else glob.glob("/usr/share/fonts/**/DejaVuSans-Bold.ttf", recursive=True))
+        def _find(name):
+            for p in [os.path.join(_here, "fonts", name), os.path.join(_here, name)]:
+                if os.path.exists(p):
+                    return [p]
+            return glob.glob("/usr/share/fonts/**/" + name, recursive=True)
+        c = _find("DejaVuSans.ttf")
+        b = _find("DejaVuSans-Bold.ttf")
         if c:
             pdfmetrics.registerFont(TTFont("OIQ", c[0])); reg["base"] = "OIQ"
         if b:
