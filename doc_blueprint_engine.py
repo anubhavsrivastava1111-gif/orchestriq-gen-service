@@ -24,8 +24,7 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.enum.chart import XL_CHART_TYPE
 from pptx_engine import (_blank, _bar, _txt, _bullets, _notes, _header,
-                         _chart, _table, _metric_cards, _two_col, _hero, _round,
-                         NAVY, TEAL, WHITE, GREY, SW, SH)
+                         _chart, _table, NAVY, TEAL, WHITE, GREY, SW, SH)
 
 _CT = {"bar": XL_CHART_TYPE.COLUMN_CLUSTERED, "line": XL_CHART_TYPE.LINE_MARKERS,
        "pie": XL_CHART_TYPE.PIE, "stacked": XL_CHART_TYPE.COLUMN_STACKED,
@@ -51,81 +50,64 @@ def render_pptx_blueprint(bp: dict) -> bytes:
     title = str(bp.get("title", "Presentation"))[:80]
     subtitle = str(bp.get("subtitle", ""))[:80]
 
-    # ── Title ──
+    # Title slide
     s = _blank(prs)
     _bar(s, 0, 0, SW, SH, NAVY)
-    _bar(s, 0, Inches(4.7), SW, Inches(0.09), TEAL)
-    _bar(s, Inches(0.9), Inches(2.35), Inches(1.4), Inches(0.14), TEAL)
-    _txt(s, Inches(0.9), Inches(2.6), Inches(11.5), Inches(1.5), title, 40, True, WHITE)
+    _bar(s, 0, Inches(4.6), SW, Inches(0.08), TEAL)
+    _txt(s, Inches(0.9), Inches(2.6), Inches(11.5), Inches(1.4), title, 40, True, WHITE)
     if subtitle:
-        _txt(s, Inches(0.9), Inches(4.95), Inches(11), Inches(0.6), subtitle, 20, False, TEAL)
+        _txt(s, Inches(0.9), Inches(4.9), Inches(11), Inches(0.6), subtitle, 20, False, TEAL)
     _notes(s, bp.get("opening_notes", "Open with the one-line framing of this deck."))
 
-    slides_in = (bp.get("slides") or [])
+    # Agenda from slide headings
+    heads = [str(sl.get("h", ""))[:60] for sl in (bp.get("slides") or []) if sl.get("h")]
+    if len(heads) >= 3:
+        s = _blank(prs); _header(s, "Agenda", "Overview")
+        half = (len(heads[:12]) + 1) // 2
+        _bullets(s, Inches(0.8), Inches(1.9), Inches(5.8), Inches(5), heads[:half], 16)
+        _bullets(s, Inches(7.0), Inches(1.9), Inches(5.8), Inches(5), heads[half:12], 16)
+        _notes(s, "Walk the agenda in 20 seconds.")
 
-    for sl in slides_in[:24]:
+    for sl in (bp.get("slides") or [])[:24]:
         t = sl.get("type", "bullets")
         h = str(sl.get("h", "Section"))[:70]
         kick = str(sl.get("kicker", ""))[:40]
         s = _blank(prs); _header(s, h, kick)
-
         if t == "chart" and sl.get("chart"):
             cats, series = _safe_chart_data(sl["chart"])
             ctype = _CT.get(sl["chart"].get("ctype", "bar"), _CT["bar"])
-            _chart(s, ctype, cats, series, Inches(0.8), Inches(1.85),
-                   Inches(11.7), Inches(5.0), str(sl["chart"].get("title", h))[:60])
-
+            _chart(s, ctype, cats, series, Inches(0.9), Inches(1.8),
+                   Inches(11.5), Inches(5.1), str(sl["chart"].get("title", h))[:60])
         elif t == "table" and (sl.get("table") or {}).get("rows"):
-            rows = [[str(c)[:70] for c in r[:6]] for r in sl["table"]["rows"][:9]]
-            nc = len(rows[0]); tw = Inches(12.1)
-            cw = [int(tw / nc)] * nc
-            _table(s, rows, Inches(0.6), Inches(1.95), tw, Inches(4.6), cw)
-
+            rows = [[str(c)[:60] for c in r[:6]] for r in sl["table"]["rows"][:10]]
+            w = min(11.9, 2.2 * len(rows[0]) + 2)
+            _table(s, rows, Inches(0.7), Inches(1.9), Inches(w), Inches(4.6))
         elif t == "kpi" and sl.get("kpis"):
-            kp = sl["kpis"]
-            cards = [(str(k[0])[:22] if len(k) > 0 else "",
-                      str(k[1])[:14] if len(k) > 1 else "",
-                      str(k[2])[:20] if len(k) > 2 else "") for k in kp[:4]]
-            _metric_cards(s, cards)
-            if len(kp) > 4:
-                rows = [["Metric", "Value", "Δ"]] + [[str(x)[:40] for x in (k[:3] + [""] * (3 - len(k[:3])))] for k in kp[4:10]]
-                _table(s, rows, Inches(0.6), Inches(3.95), Inches(12.1), Inches(2.9),
-                       [Inches(5.5), Inches(3.3), Inches(3.3)])
-
+            rows = [["Metric", "Value", "Δ"]] + [[str(x)[:36] for x in (k[:3] + [""] * (3 - len(k[:3])))]
+                                                for k in sl["kpis"][:8]]
+            _table(s, rows, Inches(1.2), Inches(1.9), Inches(10.9), Inches(4.6))
         elif t == "two_col":
-            lt = str(sl.get("left_title", "Perspective A"))[:34]
-            rt = str(sl.get("right_title", "Perspective B"))[:34]
-            _two_col(s, lt, [str(p)[:130] for p in (sl.get("left") or [])[:6]],
-                     rt, [str(p)[:130] for p in (sl.get("right") or [])[:6]])
-
-        elif t == "hero" and sl.get("hero"):
-            big = str(sl["hero"].get("value", "\u2014"))[:12]
-            cap = str(sl["hero"].get("caption", ""))[:90]
-            sup = [str(p)[:120] for p in (sl.get("points") or sl["hero"].get("support") or [])[:6]]
-            _hero(s, big, cap, sup)
-
+            _bullets(s, Inches(0.8), Inches(1.9), Inches(5.8), Inches(4.8),
+                     [str(p)[:120] for p in (sl.get("left") or [])[:6]], 15)
+            _bullets(s, Inches(7.0), Inches(1.9), Inches(5.8), Inches(4.8),
+                     [str(p)[:120] for p in (sl.get("right") or [])[:6]], 15)
         else:
-            pts = [str(p)[:160] for p in (sl.get("points") or ["Content"])[:7]]
-            if len(pts) >= 4:
-                # split long bullet lists into a left-rail styled layout for polish
-                _bar(s, 0, Inches(1.7), Inches(0.9), SH - Inches(1.7), NAVY)
-                _bullets(s, Inches(1.3), Inches(1.95), Inches(11.4), Inches(4.7), pts, 16)
-            else:
-                _bullets(s, Inches(0.8), Inches(1.95), Inches(11.8), Inches(4.6), pts, 17)
-
+            _bullets(s, Inches(0.8), Inches(1.9), Inches(11.8), Inches(4.6),
+                     [str(p)[:160] for p in (sl.get("points") or ["Content"])[:7]], 17)
         _notes(s, str(sl.get("notes", f"Speak to: {h}"))[:400])
 
-    # ── Closing ──
+    # Closing
     s = _blank(prs)
     _bar(s, 0, 0, SW, SH, NAVY)
-    _bar(s, 0, Inches(3.7), SW, Inches(0.06), TEAL)
-    _txt(s, Inches(0.9), Inches(2.7), Inches(11.5), Inches(1.1), "Thank You", 44, True, WHITE)
-    _txt(s, Inches(0.9), Inches(4.0), Inches(11.5), Inches(0.7), "Questions & Discussion", 20, False, TEAL)
+    _txt(s, Inches(0.9), Inches(2.8), Inches(11.5), Inches(1.2), "Thank You", 44, True, WHITE)
+    _txt(s, Inches(0.9), Inches(4.2), Inches(11.5), Inches(0.8),
+         "Questions & Discussion", 20, False, TEAL)
     _notes(s, "Open the floor for questions.")
 
+    # Floor: >=10 slides
     while len(prs.slides) < 10:
-        s = _blank(prs); _header(s, "Supplementary Analysis", "Appendix")
-        _bullets(s, Inches(0.8), Inches(1.95), Inches(11.8), Inches(4),
+        s = _blank(prs); _header(s, "Supplementary", "Appendix")
+        _bullets(s, Inches(0.8), Inches(1.9), Inches(11.8), Inches(4), 
                  ["Additional detail available on request"], 16)
         _notes(s, "Auto-appendix.")
     buf = io.BytesIO(); prs.save(buf)
@@ -141,7 +123,7 @@ from reportlab.lib.pagesizes import A4
 from reportlab.lib.units import cm
 from reportlab.platypus import (BaseDocTemplate, PageTemplate, Frame, Paragraph,
                                 Spacer, Table, PageBreak, NextPageTemplate)
-from pdf_engine import (_cover, _hf, _tstyle, _bar_drawing,
+from pdf_engine import (_cover, _hf, _tstyle, _bar_drawing, _wrapped_table,
                         S_H1, S_BODY, S_TOC, S_SMALL, W, H)
 
 
@@ -164,14 +146,18 @@ def render_pdf_blueprint(bp: dict) -> bytes:
     for s in secs:
         el.append(Paragraph(str(s.get("h", "Section"))[:80], S_H1))
         if s.get("body"):
-            el.append(Paragraph(str(s["body"])[:2500], S_BODY))
+            el.append(Paragraph(str(s["body"])[:6000], S_BODY))
         for b in (s.get("bullets") or [])[:8]:
-            el.append(Paragraph("•  " + str(b)[:250], S_BODY))
+            el.append(Paragraph("•  " + str(b)[:600], S_BODY))
         tab = (s.get("table") or {}).get("rows")
         if tab:
-            rows = [[str(c)[:45] for c in r[:5]] for r in tab[:12]]
-            cw = (W - 4 * cm) / len(rows[0])
-            t = Table(rows, colWidths=[cw] * len(rows[0])); t.setStyle(_tstyle())
+            # Wrap every cell (Paragraph) so long text wraps inside its column
+            # instead of overflowing the right margin. Even column widths that
+            # sum to exactly the frame width keep the table inside the page.
+            rows = [[str(c) for c in r[:5]] for r in tab[:12]]
+            ncol = len(rows[0]) if rows else 1
+            cw = (W - 4 * cm) / ncol
+            t = _wrapped_table(rows, [cw] * ncol)
             el.append(Spacer(1, 8)); el.append(t); el.append(Spacer(1, 8))
         ch = s.get("chart")
         if ch and ch.get("series"):
