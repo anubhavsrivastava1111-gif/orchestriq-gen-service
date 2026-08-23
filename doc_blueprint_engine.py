@@ -79,18 +79,22 @@ def render_pptx_blueprint(bp: dict) -> bytes:
             _chart(s, ctype, cats, series, Inches(0.9), Inches(1.8),
                    Inches(11.5), Inches(5.1), str(sl["chart"].get("title", h))[:60])
         elif t == "table" and (sl.get("table") or {}).get("rows"):
-            rows = [[str(c)[:60] for c in r[:6]] for r in sl["table"]["rows"][:10]]
-            w = min(11.9, 2.2 * len(rows[0]) + 2)
-            _table(s, rows, Inches(0.7), Inches(1.9), Inches(w), Inches(4.6))
+            rows = [[_clean_cell(c, 60) for c in r[:6]] for r in sl["table"]["rows"][:10]]
+            ncol = len(rows[0]) if rows else 1
+            rows = [(r + [""] * ncol)[:ncol] for r in rows]
+            w = 11.9
+            ratios = _col_ratios(rows) or [1.0 / ncol] * ncol
+            _table(s, rows, Inches(0.7), Inches(1.9), Inches(w), Inches(4.6),
+                   col_widths=[Inches(w * x) for x in ratios])
         elif t == "kpi" and sl.get("kpis"):
             rows = [["Metric", "Value", "Δ"]] + [[str(x)[:36] for x in (k[:3] + [""] * (3 - len(k[:3])))]
                                                 for k in sl["kpis"][:8]]
             _table(s, rows, Inches(1.2), Inches(1.9), Inches(10.9), Inches(4.6))
         elif t == "two_col":
             _bullets(s, Inches(0.8), Inches(1.9), Inches(5.8), Inches(4.8),
-                     [str(p)[:120] for p in (sl.get("left") or [])[:6]], 15)
+                     [_clean_cell(p, 120) for p in (sl.get("left") or [])[:6]], 15)
             _bullets(s, Inches(7.0), Inches(1.9), Inches(5.8), Inches(4.8),
-                     [str(p)[:120] for p in (sl.get("right") or [])[:6]], 15)
+                     [_clean_cell(p, 120) for p in (sl.get("right") or [])[:6]], 15)
         else:
             _bullets(s, Inches(0.8), Inches(1.9), Inches(11.8), Inches(4.6),
                      [str(p)[:160] for p in (sl.get("points") or ["Content"])[:7]], 17)
@@ -127,6 +131,40 @@ from pdf_engine import (_cover, _hf, _tstyle, _bar_drawing, _wrapped_table,
                         S_H1, S_BODY, S_TOC, S_SMALL, W, H)
 
 
+# ── Shared table helpers ─────────────────────────────────────────────────────
+# Both engines were giving EVERY column the same width regardless of content.
+# In your PowerPoint that produced six columns at exactly 2.02 inches each, so
+# "Typical Annual Cost per Seat" was cut off while "Player" wasted most of its
+# space. Widths are now proportional to what each column actually holds.
+def _col_ratios(rows):
+    if not rows:
+        return []
+    ncol = len(rows[0])
+    out = []
+    for i in range(ncol):
+        vals = [str(r[i]) for r in rows[1:] if i < len(r)] or [str(rows[0][i])]
+        avg = sum(len(v) for v in vals) / max(len(vals), 1)
+        head = len(str(rows[0][i])) if i < len(rows[0]) else 0
+        # numeric columns stay narrow; long prose gets more room
+        numeric = all(v.strip().replace(",", "").replace(".", "").replace("%", "")
+                      .replace("-", "").replace("\u20b9", "").isdigit()
+                      for v in vals if v.strip())
+        w = 1.0 if numeric else max(1.0, min(3.2, avg / 14.0))
+        out.append(max(w, head / 22.0))
+    tot = sum(out) or ncol
+    return [w / tot for w in out]
+ 
+ 
+def _clean_cell(s, cap):
+    """Strip markdown the renderers cannot parse, and cut at a WORD boundary."""
+    t = str(s if s is not None else "")
+    t = t.replace("**", "").replace("__", "").strip()
+    if len(t) <= cap:
+        return t
+    sp = t[:cap].rfind(" ")
+    return (t[:sp] if sp > cap * 0.6 else t[:cap]).rstrip(" ,;:-") + "\u2026"
+ 
+ 
 def render_pdf_blueprint(bp: dict) -> bytes:
     title = str(bp.get("title", "Report"))[:90]
     subtitle = str(bp.get("subtitle", "Business Report"))[:90]
@@ -154,10 +192,14 @@ def render_pdf_blueprint(bp: dict) -> bytes:
             # Wrap every cell (Paragraph) so long text wraps inside its column
             # instead of overflowing the right margin. Even column widths that
             # sum to exactly the frame width keep the table inside the page.
-            rows = [[str(c) for c in r[:5]] for r in tab[:12]]
+            rows = [[_clean_cell(c, 90) for c in r[:6]] for r in tab[:14]]
+            # Every row padded to the header width. A short row used to shift its
+            # own cells left, which is why headings sat over the wrong column.
             ncol = len(rows[0]) if rows else 1
-            cw = (W - 4 * cm) / ncol
-            t = _wrapped_table(rows, [cw] * ncol)
+            rows = [(r + [""] * ncol)[:ncol] for r in rows]
+            avail = W - 4 * cm
+            ratios = _col_ratios(rows) or [1.0 / ncol] * ncol
+            t = _wrapped_table(rows, [avail * x for x in ratios])
             el.append(Spacer(1, 8)); el.append(t); el.append(Spacer(1, 8))
         ch = s.get("chart")
         if ch and ch.get("series"):
