@@ -130,10 +130,31 @@ def _chart(slide, ctype, cats, series, x, y, w, h, title=""):
         except Exception: pass
     try:
         for plot in ch.plots:
-            for j, ser in enumerate(plot.series):
-                ser.format.fill.solid()
-                ser.format.fill.fore_color.rgb = CHART_PALETTE[j % len(CHART_PALETTE)]
-    except Exception: pass
+            sers = list(plot.series)
+            # Colour was applied PER SERIES. A chart with one series and seven
+            # categories therefore got one colour for all seven bars - which is
+            # why every column chart came out solid blue. With a single series,
+            # colour each POINT instead so the categories are distinguishable.
+            if len(sers) == 1:
+                ser = sers[0]
+                try:
+                    plot.vary_by_categories = True
+                except Exception:
+                    pass
+                pts = list(ser.points)
+                if pts:
+                    for i, pt in enumerate(pts):
+                        pt.format.fill.solid()
+                        pt.format.fill.fore_color.rgb = CHART_PALETTE[i % len(CHART_PALETTE)]
+                else:
+                    ser.format.fill.solid()
+                    ser.format.fill.fore_color.rgb = CHART_PALETTE[0]
+            else:
+                for j, ser in enumerate(sers):
+                    ser.format.fill.solid()
+                    ser.format.fill.fore_color.rgb = CHART_PALETTE[j % len(CHART_PALETTE)]
+    except Exception:
+        pass
     return ch
 
 
