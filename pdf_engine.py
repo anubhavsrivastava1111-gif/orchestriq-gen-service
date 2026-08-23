@@ -131,6 +131,12 @@ def _tstyle():
         ("LEFTPADDING", (0, 0), (-1, -1), 8),
         ("RIGHTPADDING", (0, 0), (-1, -1), 6),
         ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        # Belt and braces for the rupee symbol. Cells wrapped in a Paragraph
+        # already carry the DejaVu font, but ANY cell that reaches a Table as a
+        # raw string falls back to Helvetica, which has no rupee glyph - that is
+        # the black box you saw in table headers such as "Monthly (?)".
+        ("FONTNAME", (0, 0), (-1, -1), FONT),
+        ("FONTNAME", (0, 0), (-1, 0), FONT_BOLD),
     ])
 
 
