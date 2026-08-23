@@ -99,8 +99,18 @@ def _cover(canvas, doc, title, subtitle):
     y = H - 9 * cm
     for line in _wrap(title, 30):
         canvas.drawString(2.2 * cm, y, line); y -= 1.15 * cm
-    canvas.setFillColor(TEAL); canvas.setFont(FONT, 15)
-    canvas.drawString(2.2 * cm, y - 0.6 * cm, subtitle)
+    # The subtitle was a single drawString with no wrapping, so anything longer
+    # than the page ran straight off the edge - your cover read
+    # "...Working Capital Optimizati" with the rest missing. It now wraps, and
+    # the font steps down once if it is very long.
+    canvas.setFillColor(TEAL)
+    sub = str(subtitle or "")
+    fsize = 15 if len(sub) <= 60 else 12
+    canvas.setFont(FONT, fsize)
+    sy = y - 0.6 * cm
+    for sline in _wrap(sub, 62 if fsize == 15 else 78)[:3]:
+        canvas.drawString(2.2 * cm, sy, sline)
+        sy -= (fsize + 5) * 0.0353 * cm * 10
     canvas.setFillColor(LGREY); canvas.setFont(FONT, 10)
     canvas.drawString(2.2 * cm, 2.6 * cm, "Confidential \u2014 Prepared for the Board of Directors")
     canvas.setFillColor(TEAL); canvas.rect(0, 1.8 * cm, W, 0.12 * cm, fill=1, stroke=0)
