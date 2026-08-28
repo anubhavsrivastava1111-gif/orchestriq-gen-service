@@ -31,14 +31,52 @@ _CT = {"bar": XL_CHART_TYPE.COLUMN_CLUSTERED, "line": XL_CHART_TYPE.LINE_MARKERS
        "hbar": XL_CHART_TYPE.BAR_CLUSTERED}
 
 
+def _fmt_num(v):
+    """Numbers as a person writes them: 37,500 not 37500.0, 3.5 not 3.5000."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    if f == int(f) and abs(f) < 1e15:
+        return "{:,}".format(int(f))
+    return "{:,.2f}".format(f)
+
+
+def _chart_data_rows(cats, series, max_cols=9):
+    """The chart's own numbers, as a table the reader can check.
+
+    A chart is a claim; this is the evidence for it. Categories run across the
+    top and each series becomes a row, which is the orientation that stays
+    readable on a slide. If there are more categories than fit, the extra ones
+    are dropped from the TABLE only - never from the chart - and the header
+    says so, so nobody assumes they are seeing all of it."""
+    if not cats or not series:
+        return []
+    show = cats[:max_cols]
+    truncated = len(cats) > max_cols
+    head = ["Series"] + [str(c) for c in show]
+    if truncated:
+        head[-1] = str(show[-1]) + " (+" + str(len(cats) - max_cols) + " more)"
+    rows = [head]
+    for name, vals in series[:5]:
+        rows.append([_clean_cell(name, 34)] + [_fmt_num(v) for v in vals[:len(show)]])
+    return rows
+
+
 def _safe_chart_data(ch):
-    cats = [str(c)[:24] for c in (ch.get("cats") or ["A", "B", "C"])[:12]]
+    cats = [_clean_cell(c, 24) for c in (ch.get("cats") or ["A", "B", "C"])[:12]]
     series = []
     for s in (ch.get("series") or [])[:4]:
         if isinstance(s, list) and len(s) == 2 and isinstance(s[1], list):
             vals = [float(v) if isinstance(v, (int, float)) else 0 for v in s[1][:12]]
             vals += [0] * (len(cats) - len(vals))
-            series.append((str(s[0])[:30], vals[:len(cats)]))
+            # WAS str(s[0])[:30] - a blind 30-character cut. That produced the
+            # legend entries you saw: "SaaS Revenue (3 contracts x $1",
+            # "Audit Fee Avoidance (One-Time ", "Series A Readiness (Valuation ".
+            # All severed mid-word with the bracket left open. _clean_cell cuts
+            # at a WORD boundary and marks the cut, so a legend never lies about
+            # what a series is.
+            series.append((_clean_cell(s[0], 42), vals[:len(cats)]))
     if not series:
         series = [("Series 1", [1.0] * len(cats))]
     return cats, series
@@ -47,8 +85,8 @@ def _safe_chart_data(ch):
 def render_pptx_blueprint(bp: dict) -> bytes:
     prs = Presentation()
     prs.slide_width = SW; prs.slide_height = SH
-    title = str(bp.get("title", "Presentation"))[:80]
-    subtitle = str(bp.get("subtitle", ""))[:80]
+    title = _clean_cell(bp.get("title", "Presentation"), 88)
+    subtitle = _clean_cell(bp.get("subtitle", ""), 96)
 
     # Title slide
     s = _blank(prs)
@@ -60,7 +98,7 @@ def render_pptx_blueprint(bp: dict) -> bytes:
     _notes(s, bp.get("opening_notes", "Open with the one-line framing of this deck."))
 
     # Agenda from slide headings
-    heads = [str(sl.get("h", ""))[:60] for sl in (bp.get("slides") or []) if sl.get("h")]
+    heads = [_clean_cell(sl.get("h", ""), 66) for sl in (bp.get("slides") or []) if sl.get("h")]
     if len(heads) >= 3:
         s = _blank(prs); _header(s, "Agenda", "Overview")
         half = (len(heads[:12]) + 1) // 2
@@ -70,14 +108,28 @@ def render_pptx_blueprint(bp: dict) -> bytes:
 
     for sl in (bp.get("slides") or [])[:24]:
         t = sl.get("type", "bullets")
-        h = str(sl.get("h", "Section"))[:70]
-        kick = str(sl.get("kicker", ""))[:40]
+        # WAS [:70] and [:40], blind cuts. They produced the headings you saw
+        # with an unclosed bracket: "MONTH-END CLOSE PROCESS (GHOST STANDARD"
+        # and "FINANCIAL & COMPLIANCE BENEFITS (3-YEAR".
+        h = _clean_cell(sl.get("h", "Section"), 78)
+        kick = _clean_cell(sl.get("kicker", ""), 52)
         s = _blank(prs); _header(s, h, kick)
         if t == "chart" and sl.get("chart"):
             cats, series = _safe_chart_data(sl["chart"])
             ctype = _CT.get(sl["chart"].get("ctype", "bar"), _CT["bar"])
-            _chart(s, ctype, cats, series, Inches(0.9), Inches(1.8),
-                   Inches(11.5), Inches(5.1), str(sl["chart"].get("title", h))[:60])
+            # EVERY CHART NOW SHOWS THE NUMBERS IT WAS DRAWN FROM.
+            # A chart on its own cannot be checked: the reader sees a shape and
+            # has to trust it. Printing the source values underneath makes the
+            # figures auditable on the slide itself - if a number in the table
+            # is wrong, it is visible, rather than hidden inside a picture.
+            _chart(s, ctype, cats, series, Inches(0.9), Inches(1.75),
+                   Inches(11.5), Inches(3.75), _clean_cell(sl["chart"].get("title", h), 70))
+            drows = _chart_data_rows(cats, series)
+            if drows:
+                _table(s, drows, Inches(0.9), Inches(5.72), Inches(11.5), Inches(1.25))
+                _txt(s, Inches(0.9), Inches(7.02), Inches(11.5), Inches(0.3),
+                     "Source data for the chart above \u2014 figures as supplied by the "
+                     "workspace analysis.", 9, False, GREY)
         elif t == "table" and (sl.get("table") or {}).get("rows"):
             rows = [[_clean_cell(c, 60) for c in r[:6]] for r in sl["table"]["rows"][:10]]
             ncol = len(rows[0]) if rows else 1
@@ -87,7 +139,7 @@ def render_pptx_blueprint(bp: dict) -> bytes:
             _table(s, rows, Inches(0.7), Inches(1.9), Inches(w), Inches(4.6),
                    col_widths=[Inches(w * x) for x in ratios])
         elif t == "kpi" and sl.get("kpis"):
-            rows = [["Metric", "Value", "Δ"]] + [[str(x)[:36] for x in (k[:3] + [""] * (3 - len(k[:3])))]
+            rows = [["Metric", "Value", "Δ"]] + [[_clean_cell(x, 40) for x in (k[:3] + [""] * (3 - len(k[:3])))]
                                                 for k in sl["kpis"][:8]]
             _table(s, rows, Inches(1.2), Inches(1.9), Inches(10.9), Inches(4.6))
         elif t == "two_col":
@@ -96,8 +148,13 @@ def render_pptx_blueprint(bp: dict) -> bytes:
             _bullets(s, Inches(7.0), Inches(1.9), Inches(5.8), Inches(4.8),
                      [_clean_cell(p, 120) for p in (sl.get("right") or [])[:6]], 15)
         else:
+            # WAS str(p)[:160]. Two faults: it cut mid-word, and it left
+            # markdown in place - which is why "**APPROVE**" and "**GATE 1**"
+            # appeared literally on your slides with the asterisks showing.
+            # _clean_cell strips the markers and cuts at a word boundary. 210
+            # characters is what fits this box without overflowing it.
             _bullets(s, Inches(0.8), Inches(1.9), Inches(11.8), Inches(4.6),
-                     [str(p)[:160] for p in (sl.get("points") or ["Content"])[:7]], 17)
+                     [_clean_cell(p, 210) for p in (sl.get("points") or ["Content"])[:7]], 17)
         _notes(s, str(sl.get("notes", f"Speak to: {h}"))[:400])
 
     # Closing
