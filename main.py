@@ -42,6 +42,13 @@ class GenRequest(BaseModel):
     provider_order: Optional[str] = ""   # e.g. "deepseek,claude,openai" — first working one wins
     title: Optional[str] = ""
     subtitle: Optional[str] = ""
+    # The frontend now sends WHO the document is for and a full generation brief
+    # describing what that reader needs. Before this, the service received only
+    # raw content and had to guess - so an investor deck and an operations
+    # review were generated from identical instructions.
+    audience: Optional[str] = "general"
+    doc_purpose: Optional[str] = ""
+    generation_brief: Optional[str] = ""
 
 
 def _keys_and_order(req: "GenRequest"):
@@ -88,7 +95,8 @@ def _pipeline(req: GenRequest, fmt: str) -> Response:
     obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
     sym = (req.currency_symbol or "\u20b9")[:4]
     keys, order = _keys_and_order(req)
-    model, mode, reason = ai_extractor.extract(obj, ctx, data, keys, order, sym)
+    model, mode, reason = ai_extractor.extract(obj, ctx, data, keys, order, sym,
+                                               brief=(req.generation_brief or ""))
     title = (req.title or model.get("title") or obj)[:90]
     subtitle = (req.subtitle or "Board of Directors Review")[:90]
 
