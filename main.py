@@ -23,6 +23,7 @@ from docx_engine import build_docx
 from blueprint_engine import render_blueprint
 from doc_blueprint_engine import (render_pptx_blueprint, render_pdf_blueprint,
                                   render_docx_blueprint)
+import layout_engine
 
 VERSION = "4.3.0"
 
@@ -86,6 +87,31 @@ def _keys_and_order(req: "GenRequest"):
     if not order:
         order = ["deepseek", "claude", "openai"]
     return keys, order
+
+
+# FOUND BY TESTING THE NEW ENDPOINT, AND IT APPLIES TO ALL OF THEM.
+# The blueprint bounds below trim a payload only AFTER FastAPI has parsed the
+# whole JSON body into memory. A deliberately huge body therefore exhausts the
+# container before any of our limits are consulted - I reproduced exactly that
+# and killed the process. This middleware refuses the request at the door, using
+# Content-Length, before a single byte is deserialised.
+# 12 MB is far above any real document request (120,000 characters of content is
+# about 0.12 MB) and far below what hurts a Railway container.
+_MAX_BODY_BYTES = 12 * 1024 * 1024
+
+
+@app.middleware("http")
+async def _limit_body(request: Request, call_next):
+    cl = request.headers.get("content-length")
+    if cl:
+        try:
+            if int(cl) > _MAX_BODY_BYTES:
+                return JSONResponse(status_code=413,
+                                    content={"error": "Request body too large.",
+                                             "engine": "error"})
+        except ValueError:
+            pass
+    return await call_next(request)
 
 
 @app.exception_handler(Exception)
@@ -219,6 +245,134 @@ def _doc_blueprint_pipeline(req: GenRequest, fmt: str) -> Response:
     except Exception:
         traceback.print_exc()
     return _pipeline(req, fmt)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RENDER-ONLY PATH
+#
+# WHY THIS EXISTS. Two problems, one answer.
+#
+#   1. NVIDIA could not generate documents. The NVIDIA key lives in Cloudflare,
+#      server-side, reachable only through /api/nvidia from the user's own
+#      browser. This service runs on Railway - a different machine that has no
+#      NVIDIA key and cannot be given one without duplicating the secret onto a
+#      second platform. So /generate/* could only ever use Claude, OpenAI or
+#      DeepSeek.
+#
+#   2. Customer API keys were being POSTed to this service in the request body.
+#      TLS protects them in flight, but any request logging or proxy on the
+#      Railway side captures live customer credentials - credentials we never
+#      intended to hold. That has been an open HIGH finding since Session 47.
+#
+# Both dissolve if the AI step happens in the BROWSER, where every provider is
+# already reachable, and this service only renders. The browser sends a finished
+# blueprint; Railway turns it into a file. No keys are sent, because none are
+# needed. Railway stops being an AI client and becomes what it is good at: a
+# renderer.
+#
+# The /generate/* endpoints below are UNCHANGED and still work exactly as before,
+# so nothing that currently functions can break. This is an additional path, not
+# a replacement.
+# ─────────────────────────────────────────────────────────────────────────────
+
+class RenderRequest(BaseModel):
+    """A finished document blueprint, ready to render. Note what is ABSENT:
+    no api_key, no claude_key, no openai_key, no deepseek_key. This endpoint
+    cannot receive a credential because it has nowhere to put one."""
+    blueprint: dict = {}
+    title: Optional[str] = ""
+    subtitle: Optional[str] = ""
+    currency_symbol: Optional[str] = "\u20b9"
+    service_secret: Optional[str] = ""
+
+
+# Bounds. This endpoint renders caller-supplied structure, so it must not be
+# possible to hand it something that exhausts the container. A blueprint with
+# 50,000 slides is not a document, it is a denial-of-service. These caps are
+# far above any real document and far below anything that hurts.
+_MAX_SECTIONS = 60
+_MAX_ROWS = 200
+_MAX_COLS = 20
+_MAX_SERIES = 12
+_MAX_POINTS = 60
+
+
+def _bounded(bp):
+    """Trim a caller-supplied blueprint to sane limits. Never raises: a
+    malformed blueprint yields a smaller document, not an error."""
+    if not isinstance(bp, dict):
+        return {}
+    out = dict(bp)
+    secs = out.get("slides") or out.get("sections") or []
+    if not isinstance(secs, list):
+        secs = []
+    trimmed = []
+    for s in secs[:_MAX_SECTIONS]:
+        if not isinstance(s, dict):
+            continue
+        s = dict(s)
+        tbl = s.get("table")
+        if isinstance(tbl, dict) and isinstance(tbl.get("rows"), list):
+            s["table"] = dict(tbl, rows=[r[:_MAX_COLS] for r in tbl["rows"][:_MAX_ROWS]
+                                         if isinstance(r, list)])
+        ch = s.get("chart")
+        if isinstance(ch, dict):
+            ch = dict(ch)
+            if isinstance(ch.get("cats"), list):
+                ch["cats"] = ch["cats"][:_MAX_POINTS]
+            if isinstance(ch.get("series"), list):
+                ch["series"] = [x for x in ch["series"][:_MAX_SERIES]
+                                if isinstance(x, list) and len(x) == 2]
+            s["chart"] = ch
+        for k in ("points", "left", "right", "kpis"):
+            if isinstance(s.get(k), list):
+                s[k] = s[k][:_MAX_ROWS]
+        trimmed.append(s)
+    if "slides" in out or "sections" not in out:
+        out["slides"] = trimmed
+    else:
+        out["sections"] = trimmed
+    return out
+
+
+def _render_only(req: RenderRequest, fmt: str) -> Response:
+    """Render a blueprint the browser already produced. No AI, no keys."""
+    renderers = {"pptx": render_pptx_blueprint, "pdf": render_pdf_blueprint,
+                 "docx": render_docx_blueprint}
+    if fmt not in renderers:
+        raise HTTPException(status_code=400, detail="Unsupported format")
+    _require_auth(req)
+    bp = _bounded(req.blueprint)
+    if not (bp.get("slides") or bp.get("sections")):
+        raise HTTPException(status_code=400,
+                            detail="Blueprint contains no slides or sections to render.")
+    sym = (req.currency_symbol or "\u20b9")[:4]
+    if req.title:
+        bp["title"] = str(req.title)[:120]
+    if req.subtitle:
+        bp["subtitle"] = str(req.subtitle)[:140]
+    try:
+        # Same styling pass the AI path applies, so a browser-built blueprint
+        # and a Railway-built one come out looking identical.
+        bp = layout_engine.style_blueprint(bp, sym)
+    except Exception as e:
+        print("[gen-service] style_blueprint skipped: %s" % type(e).__name__)
+    blob = renderers[fmt](bp)
+    return Response(content=blob, media_type=MIMES[fmt], status_code=200,
+                    headers={"X-Engine-Mode": "render-only", "X-Engine-Reason": "browser blueprint",
+                             "X-Engine-Version": VERSION, "X-Engine-Path": "render"})
+
+
+@app.post("/render/pptx")
+def render_pptx(req: RenderRequest): return _render_only(req, "pptx")
+
+
+@app.post("/render/pdf")
+def render_pdf(req: RenderRequest): return _render_only(req, "pdf")
+
+
+@app.post("/render/docx")
+def render_docx(req: RenderRequest): return _render_only(req, "docx")
 
 
 @app.post("/generate/pptx")
