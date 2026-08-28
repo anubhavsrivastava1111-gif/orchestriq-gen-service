@@ -167,13 +167,13 @@ def gen_excel(req: GenRequest):
     last-resort floor. Never raises, never 500s."""
     try:
         _require_auth(req)
-    # 120,000 chars is roughly 30,000 tokens — comfortably inside the context
-    # window of every provider we route to (Claude 200k, GPT-4o 128k,
-    # DeepSeek 64k tokens).
-    obj, ctx, data = sanitize_request(req.objective, req.company_context,
-                                      req.available_data, data_cap=120000)
-    sym = (req.currency_symbol or "\u20b9")[:4]
-    keys, order = _keys_and_order(req)
+        # 120,000 chars is roughly 30,000 tokens — comfortably inside the context
+        # window of every provider we route to (Claude 200k, GPT-4o 128k,
+        # DeepSeek 64k tokens).
+        obj, ctx, data = sanitize_request(req.objective, req.company_context,
+                                          req.available_data, data_cap=120000)
+        sym = (req.currency_symbol or "\u20b9")[:4]
+        keys, order = _keys_and_order(req)
         bp, mode, reason = ai_extractor.extract_blueprint(obj, ctx, data, keys, order, sym)
         if bp is not None:
             try:
@@ -196,13 +196,13 @@ def _doc_blueprint_pipeline(req: GenRequest, fmt: str) -> Response:
                  "docx": render_docx_blueprint}
     try:
         _require_auth(req)
-    # 120,000 chars is roughly 30,000 tokens — comfortably inside the context
-    # window of every provider we route to (Claude 200k, GPT-4o 128k,
-    # DeepSeek 64k tokens).
-    obj, ctx, data = sanitize_request(req.objective, req.company_context,
-                                      req.available_data, data_cap=120000)
-    sym = (req.currency_symbol or "\u20b9")[:4]
-    keys, order = _keys_and_order(req)
+        # 120,000 chars is roughly 30,000 tokens — comfortably inside the context
+        # window of every provider we route to (Claude 200k, GPT-4o 128k,
+        # DeepSeek 64k tokens).
+        obj, ctx, data = sanitize_request(req.objective, req.company_context,
+                                          req.available_data, data_cap=120000)
+        sym = (req.currency_symbol or "\u20b9")[:4]
+        keys, order = _keys_and_order(req)
         bp, mode, reason = ai_extractor.extract_doc_blueprint(fmt, obj, ctx, data,
                                                               keys, order, sym)
         if req.title:
