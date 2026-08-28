@@ -7,6 +7,8 @@ X-Engine-Mode / X-Engine-Reason response headers.
 """
 import traceback
 from fastapi import FastAPI, Request
+import os
+from fastapi import HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
@@ -25,8 +27,28 @@ from doc_blueprint_engine import (render_pptx_blueprint, render_pdf_blueprint,
 VERSION = "4.3.0"
 
 app = FastAPI(title="OrchestrIQ Document Intelligence Engine", version=VERSION)
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+# CORS WAS allow_origins=["*"], which let ANY website on the internet drive this
+# service from a visitor's browser. Combined with the absent auth below, the
+# endpoint was an open relay: the Railway URL ships inside your public JS
+# bundle, so anyone could extract it and generate documents on your compute, at
+# your cost, indefinitely. Now locked to your own origins.
+_ALLOWED = [o.strip() for o in os.environ.get(
+    "ALLOWED_ORIGINS",
+    "https://orchestriq.gorakhai.com,https://gorakhai.com").split(",") if o.strip()]
+app.add_middleware(CORSMiddleware, allow_origins=_ALLOWED, allow_methods=["POST", "GET"],
                    allow_headers=["*"], expose_headers=["X-Engine-Mode", "X-Engine-Reason"])
+ 
+ 
+def _require_auth(req: "GenRequest"):
+    """Shared-secret gate. Set SERVICE_SECRET in Railway and the same value as
+    VITE-free server config on the Cloudflare side. If SERVICE_SECRET is not
+    set, the service stays open — so deploying this file alone cannot break
+    your app. Set the variable when you are ready to enforce."""
+    expected = os.environ.get("SERVICE_SECRET", "").strip()
+    if not expected:
+        return
+    if (req.service_secret or "").strip() != expected:
+        raise HTTPException(status_code=401, detail="Unauthorized")
 
 
 class GenRequest(BaseModel):
@@ -49,6 +71,7 @@ class GenRequest(BaseModel):
     audience: Optional[str] = "general"
     doc_purpose: Optional[str] = ""
     generation_brief: Optional[str] = ""
+    service_secret: Optional[str] = ""
 
 
 def _keys_and_order(req: "GenRequest"):
@@ -67,7 +90,12 @@ def _keys_and_order(req: "GenRequest"):
 
 @app.exception_handler(Exception)
 async def global_handler(request: Request, exc: Exception):
-    traceback.print_exc()
+    # WAS traceback.print_exc(), which writes full local variable context to the
+    # Railway log. With 120,000-character payloads that means fragments of a
+    # customer's ledger and board minutes can end up in your logs — data you
+    # never intended to retain and would have to disclose in a breach. Type and
+    # message only; no payload.
+    print("[gen-service] %s: %s" % (type(exc).__name__, str(exc)[:200]))
     return JSONResponse(status_code=200,
                         content={"error": str(exc)[:200], "engine": "error"})
 
@@ -92,7 +120,12 @@ def _pipeline(req: GenRequest, fmt: str) -> Response:
     """Shared pipeline: sanitize → extract (never raises) → build → validate.
     If build with the AI-enriched model fails, retry with pure fallback model.
     This function itself never raises."""
-    obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
+    _require_auth(req)
+    # 120,000 chars is roughly 30,000 tokens — comfortably inside the context
+    # window of every provider we route to (Claude 200k, GPT-4o 128k,
+    # DeepSeek 64k tokens).
+    obj, ctx, data = sanitize_request(req.objective, req.company_context,
+                                      req.available_data, data_cap=120000)
     sym = (req.currency_symbol or "\u20b9")[:4]
     keys, order = _keys_and_order(req)
     model, mode, reason = ai_extractor.extract(obj, ctx, data, keys, order, sym,
@@ -133,9 +166,14 @@ def gen_excel(req: GenRequest):
     request (any domain, columns, row counts). v4 financial template is the
     last-resort floor. Never raises, never 500s."""
     try:
-        obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
-        sym = (req.currency_symbol or "\u20b9")[:4]
-        keys, order = _keys_and_order(req)
+        _require_auth(req)
+    # 120,000 chars is roughly 30,000 tokens — comfortably inside the context
+    # window of every provider we route to (Claude 200k, GPT-4o 128k,
+    # DeepSeek 64k tokens).
+    obj, ctx, data = sanitize_request(req.objective, req.company_context,
+                                      req.available_data, data_cap=120000)
+    sym = (req.currency_symbol or "\u20b9")[:4]
+    keys, order = _keys_and_order(req)
         bp, mode, reason = ai_extractor.extract_blueprint(obj, ctx, data, keys, order, sym)
         if bp is not None:
             try:
@@ -157,9 +195,14 @@ def _doc_blueprint_pipeline(req: GenRequest, fmt: str) -> Response:
     renderers = {"pptx": render_pptx_blueprint, "pdf": render_pdf_blueprint,
                  "docx": render_docx_blueprint}
     try:
-        obj, ctx, data = sanitize_request(req.objective, req.company_context, req.available_data)
-        sym = (req.currency_symbol or "\u20b9")[:4]
-        keys, order = _keys_and_order(req)
+        _require_auth(req)
+    # 120,000 chars is roughly 30,000 tokens — comfortably inside the context
+    # window of every provider we route to (Claude 200k, GPT-4o 128k,
+    # DeepSeek 64k tokens).
+    obj, ctx, data = sanitize_request(req.objective, req.company_context,
+                                      req.available_data, data_cap=120000)
+    sym = (req.currency_symbol or "\u20b9")[:4]
+    keys, order = _keys_and_order(req)
         bp, mode, reason = ai_extractor.extract_doc_blueprint(fmt, obj, ctx, data,
                                                               keys, order, sym)
         if req.title:
