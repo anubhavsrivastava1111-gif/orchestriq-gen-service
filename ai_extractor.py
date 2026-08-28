@@ -258,14 +258,27 @@ AVAILABLE DATA:
 """
 
 
-def extract(objective, ctx, data, keys, order=None, sym="₹"):
+def extract(objective, ctx, data, keys, order=None, sym="\u20b9", brief=""):
     """Master extraction. Returns (enriched_model_dict, mode, reason).
-    mode: 'ai:<provider>' or 'fallback'. NEVER raises."""
+    mode: 'ai:<provider>' or 'fallback'. NEVER raises.
+ 
+    `brief` is the audience/format specification built by the frontend. When it
+    is present it is prepended to the prompt, because WHO the document is for
+    changes what belongs in it - not merely how it is worded.
+ 
+    The data cap was 8,000 characters, roughly three pages. Everything past that
+    was silently discarded before the model saw it, and the model then filled
+    the gap with invention. Raised to 60,000."""
     try:
         base = _base_model(objective, sym)
-        raw, used_provider = _call_ai(_PROMPT.format(sym=sym, obj=objective[:1500],
-                                      ctx=ctx[:2000], data=data[:8000] or "(none)"),
-                       keys, order)
+        _p = _PROMPT.format(sym=sym, obj=objective[:1500],
+                            ctx=ctx[:2000], data=data[:60000] or "(none)")
+        if brief:
+            _p = ("AUDIENCE AND FORMAT BRIEF - this governs everything below.\n"
+                  "Follow it exactly. It defines who reads this document, what they\n"
+                  "need, and what this format demands.\n\n"
+                  + brief[:12000] + "\n\n" + ("=" * 60) + "\n\n" + _p)
+        raw, used_provider = _call_ai(_p, keys, order)
         if raw is None:
             if domain_detector is not None:
                 try:
@@ -509,7 +522,7 @@ def extract_blueprint(objective, ctx, data, keys, order=None, sym="\u20b9"):
     try:
         from blueprint_engine import validate_blueprint
         raw, used_provider = _call_ai(_BP_PROMPT.format(sym=sym, obj=objective[:5000],
-                                         ctx=ctx[:2000], data=(data[:6000] or "(none)")),
+                                         ctx=ctx[:2000], data=(data[:40000] or "(none)")),
                        keys, order, max_tokens=14000)
         if raw is not None:
             bp = _try_parse(raw)
@@ -646,12 +659,12 @@ def extract_doc_blueprint(fmt, objective, ctx, data, keys, order=None, sym="\u20
         from doc_blueprint_engine import validate_pptx_blueprint, validate_doc_blueprint
         if fmt == "pptx":
             prompt = _PPTX_PROMPT.format(sym=sym, obj=objective[:5000], ctx=ctx[:2000],
-                                         data=(data[:6000] or "(none)"))
+                                        data=(data[:40000] or "(none)"))
             valid = validate_pptx_blueprint
         else:
             prompt = _DOC_PROMPT.format(kind=("PDF report" if fmt == "pdf" else "Word document"),
                                         sym=sym, obj=objective[:5000], ctx=ctx[:2000],
-                                        data=(data[:6000] or "(none)"))
+                                        data=(data[:40000] or "(none)"))
             valid = validate_doc_blueprint
         raw, used_provider = _call_ai(prompt, keys, order, max_tokens=12000)
         if raw is not None:
