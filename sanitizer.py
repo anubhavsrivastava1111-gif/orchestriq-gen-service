@@ -53,10 +53,18 @@ def is_media_only(text: str) -> bool:
     return len(words) < 12
 
 
-def sanitize_request(objective: str, company_context: str, available_data: str):
+def sanitize_request(objective: str, company_context: str, available_data: str,
+                     data_cap: int = 120000):
     """Sanitize all inbound fields. If available_data is media-only, drop it
-    so engines rely on objective + fallback modeling instead of garbage."""
+    so engines rely on objective + fallback modeling instead of garbage.
+ 
+    data_cap WAS HARDCODED AT 12,000 and this function runs BEFORE extraction.
+    That made it the real ceiling on document content: raising the limit inside
+    extract() had no effect at all, because the text had already been cut here.
+    The cleaning above (stripping media URLs, control characters, emoji) is what
+    this function is for; the length cap belongs to the caller, which knows the
+    target model's context window."""
     obj = sanitize_text(objective or "", 6000) or "Executive Business Review"
     ctx = sanitize_text(company_context or "", 3000)
-    data = "" if is_media_only(available_data or "") else sanitize_text(available_data or "", 12000)
+    data = "" if is_media_only(available_data or "") else sanitize_text(available_data or "", data_cap)
     return obj, ctx, data
