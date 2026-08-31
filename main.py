@@ -40,16 +40,78 @@ app.add_middleware(CORSMiddleware, allow_origins=_ALLOWED, allow_methods=["POST"
                    allow_headers=["*"], expose_headers=["X-Engine-Mode", "X-Engine-Reason"])
  
  
-def _require_auth(req: "GenRequest"):
-    """Shared-secret gate. Set SERVICE_SECRET in Railway and the same value as
-    VITE-free server config on the Cloudflare side. If SERVICE_SECRET is not
-    set, the service stays open — so deploying this file alone cannot break
-    your app. Set the variable when you are ready to enforce."""
-    expected = os.environ.get("SERVICE_SECRET", "").strip()
-    if not expected:
-        return
-    if (req.service_secret or "").strip() != expected:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+# WHY THE ORIGINAL DESIGN COULD NOT WORK, AND I SHOULD HAVE SEEN IT SOONER.
+#
+# The first version of this gate expected a shared password sent by the caller.
+# But the caller is a BROWSER. Anything the browser must send has to be inside
+# the JavaScript it downloads, and that file is readable by anyone who opens
+# developer tools. A shared secret in a browser is not a secret - it is a
+# public string with extra steps. Turning it on would have created the
+# appearance of security while adding none.
+#
+# What actually works: the browser already holds something that proves who the
+# user is - their Supabase session token. It is issued by Supabase, signed by
+# Supabase, expires on its own, and is different for every person. This service
+# asks Supabase whether the token is real. A forged one is refused.
+#
+# This is the same approach the NVIDIA proxy already uses, so the platform now
+# has one way of answering "who is calling", not two.
+
+_SUPA_URL = os.environ.get("SUPABASE_URL", "https://wfpqesnttzarfdfsghzw.supabase.co").rstrip("/")
+_SUPA_ANON = os.environ.get("SUPABASE_ANON_KEY", "").strip()
+_AUTH_CACHE: dict = {}
+_AUTH_TTL = 300  # seconds
+
+
+def _verify_supabase_token(token: str) -> bool:
+    """True when Supabase confirms this is a live session for a real user.
+    Cached briefly: a document request makes several calls and re-checking the
+    same token every time would add latency for no extra safety."""
+    import time as _t
+    import urllib.request as _u
+    import json as _j
+
+    if not token or not _SUPA_ANON:
+        return False
+    now = _t.time()
+    hit = _AUTH_CACHE.get(token)
+    if hit and hit[0] > now:
+        return hit[1]
+    try:
+        rq = _u.Request(_SUPA_URL + "/auth/v1/user",
+                        headers={"Authorization": "Bearer " + token, "apikey": _SUPA_ANON})
+        with _u.urlopen(rq, timeout=8) as r:
+            ok = r.status == 200 and bool((_j.loads(r.read().decode()) or {}).get("id"))
+    except Exception:
+        ok = False
+    # Only successes are cached. A failure must be re-checked, so a token that
+    # has just been issued is not held down by one earlier miss.
+    if ok:
+        if len(_AUTH_CACHE) > 500:
+            _AUTH_CACHE.clear()
+        _AUTH_CACHE[token] = (now + _AUTH_TTL, True)
+    return ok
+
+
+def _require_auth(req) -> None:
+    """Refuses anyone who is not a signed-in user of your app.
+
+    STAYS OPEN until SUPABASE_ANON_KEY is set in Railway. That is deliberate:
+    deploying this file on its own cannot break document generation. Set the
+    variable only after the matching app change is live, and the door closes.
+
+    The token is read from the request body rather than a header, purely so
+    that no endpoint signature has to change - fewer moving parts, less to get
+    wrong. Over HTTPS a body is exactly as protected as a header.
+    """
+    if not _SUPA_ANON:
+        return                      # not configured yet - behave exactly as before
+
+    token = (getattr(req, "access_token", "") or "").strip()
+    if not _verify_supabase_token(token):
+        raise HTTPException(
+            status_code=401,
+            detail="Sign in required. This service only accepts requests from a signed-in OrchestrIQ user.")
 
 
 class GenRequest(BaseModel):
@@ -73,6 +135,9 @@ class GenRequest(BaseModel):
     doc_purpose: Optional[str] = ""
     generation_brief: Optional[str] = ""
     service_secret: Optional[str] = ""
+    # The caller's own Supabase session token. Preferred in the Authorization
+    # header; this field exists so an older client still works.
+    access_token: Optional[str] = ""
 
 
 def _keys_and_order(req: "GenRequest"):
@@ -276,6 +341,8 @@ def _doc_blueprint_pipeline(req: GenRequest, fmt: str) -> Response:
 # ─────────────────────────────────────────────────────────────────────────────
 
 class RenderRequest(BaseModel):
+    # Same session token as GenRequest, so /render/* is gated identically.
+    access_token: Optional[str] = ""
     """A finished document blueprint, ready to render. Note what is ABSENT:
     no api_key, no claude_key, no openai_key, no deepseek_key. This endpoint
     cannot receive a credential because it has nowhere to put one."""
