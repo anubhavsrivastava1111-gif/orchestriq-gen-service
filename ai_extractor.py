@@ -683,7 +683,43 @@ def extract_doc_blueprint(fmt, objective, ctx, data, keys, order=None, sym="\u20
     except Exception as e:
         traceback.print_exc()
         reason = f"doc blueprint exception: {str(e)[:100]}"
-    # v4.3: derive blueprint from domain-appropriate model when possible.
+    # ─────────────────────────────────────────────────────────────────────
+    # THE DEFECT THIS FIXES.
+    #
+    # Below, get_fallback_model(objective, sym) is called. Read that signature:
+    # it receives the OBJECTIVE and the CURRENCY SYMBOL. It never receives the
+    # user's content.
+    #
+    # So when the AI step failed, this did not produce an error. It produced a
+    # polished, professional, entirely generic document - "Scope drift",
+    # "Revenue by Month", "Total Value 1.65M" - none of which the user wrote.
+    # That is worse than a failure, because it looks finished. Someone could
+    # send it to a board.
+    #
+    # The content coming from Executive Chat and the Boardroom is already
+    # well-structured Markdown: headings, tables, bullets, figures. It can be
+    # turned into a document directly, with nothing invented and every number
+    # preserved exactly as written.
+    #
+    # This runs BEFORE the generic model, so real content always wins.
+    try:
+        import content_blueprint
+        _bp = content_blueprint.build(fmt, data or objective,
+                                      (objective[:90] or "Report"), "Prepared by OrchestrIQ")
+        if _bp:
+            n = len(_bp.get("sections") or _bp.get("slides") or [])
+            if n >= 2:
+                if layout_engine is not None:
+                    try:
+                        _bp = layout_engine.style_blueprint(_bp, sym)
+                    except Exception:
+                        pass
+                return _bp, "content", (reason + " | rebuilt from your content")[:160]
+    except Exception:
+        traceback.print_exc()
+
+    # Last resort only: a generic model, used when there was no usable content
+    # to work from at all.
     model = None
     if domain_detector is not None:
         try:
@@ -701,4 +737,4 @@ def extract_doc_blueprint(fmt, objective, ctx, data, keys, order=None, sym="\u20
             bp = layout_engine.style_blueprint(bp, sym)
         except Exception:
             pass
-    return bp, "fallback", reason
+    return bp, "fallback", (reason + " | GENERIC TEMPLATE - your content could not be used")[:200]
