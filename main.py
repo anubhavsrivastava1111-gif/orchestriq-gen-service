@@ -187,7 +187,19 @@ async def global_handler(request: Request, exc: Exception):
     # never intended to retain and would have to disclose in a breach. Type and
     # message only; no payload.
     print("[gen-service] %s: %s" % (type(exc).__name__, str(exc)[:200]))
-    return JSONResponse(status_code=200,
+    # WAS status_code=200. THIS IS THE SERVER HALF OF THE CORRUPT EXCEL FILE.
+    #
+    # When document generation failed, this returned HTTP 200 - the code that
+    # means "here is your file, successfully" - with a JSON error message in the
+    # body. The browser saw 200, believed it, and saved that JSON with an .xlsx
+    # name on it. Excel then reported the file was not valid, which was entirely
+    # true and completely unhelpful.
+    #
+    # A failure must look like a failure. 500 is what the browser needs to see
+    # so it can fall back or report honestly instead of writing rubbish to disk.
+    # HTTPException is handled separately by FastAPI and keeps its own status,
+    # so 401 and 400 still arrive intact.
+    return JSONResponse(status_code=500,
                         content={"error": str(exc)[:200], "engine": "error"})
 
 
