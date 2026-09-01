@@ -277,6 +277,34 @@ def gen_excel(req: GenRequest):
                                           req.available_data, data_cap=120000)
         sym = (req.currency_symbol or "\u20b9")[:4]
         keys, order = _keys_and_order(req)
+
+        # ── BEST PATH: let Claude WRITE AND RUN the spreadsheet code ──────────
+        # This is the difference between a template being filled in and a
+        # workbook being built. Claude writes openpyxl code, runs it in
+        # Anthropic's sandbox, opens the file it made, checks it and fixes its
+        # own mistakes - the same loop that produces the dashboards people get
+        # from claude.ai.
+        #
+        # The code runs on ANTHROPIC's infrastructure, never on this server, so
+        # we get the capability without putting model-written code anywhere near
+        # customer data.
+        #
+        # If there is no Claude key, or anything at all goes wrong, we fall
+        # straight through to the existing renderer below. This can only add a
+        # better result; it can never take one away.
+        try:
+            import claude_excel
+            _ck = (keys.get("claude") or "").strip()
+            if _ck:
+                _blob, _m, _r = claude_excel.build_workbook(obj, ctx, data, _ck, sym)
+                if _blob:
+                    return Response(content=_blob, media_type=MIMES["excel"], status_code=200,
+                                    headers={"X-Engine-Mode": _m, "X-Engine-Reason": _r[:120],
+                                             "X-Engine-Version": VERSION, "X-Engine-Path": "claude-code"})
+                print("[gen-service] claude_excel unavailable: %s" % _r)
+        except Exception as _e:
+            print("[gen-service] claude_excel error: %s" % str(_e)[:160])
+
         bp, mode, reason = ai_extractor.extract_blueprint(obj, ctx, data, keys, order, sym)
         if bp is not None:
             try:
